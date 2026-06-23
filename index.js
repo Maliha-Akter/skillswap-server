@@ -24,7 +24,7 @@ async function run() {
     try {
         // 1. Establishing database connection safely
         await client.connect();
-        
+
         // 2. Selecting database and establish collection references
         const db = client.db('skillswap');
         const tasksCollection = db.collection('tasks');
@@ -36,7 +36,7 @@ async function run() {
          * 1. POST /api/tasks
          * Purpose: Publish a new job block into the database collection.
          */
-        app.post('/api/tasks', async (req, res) => {
+        app.post('/tasks', async (req, res) => {
             try {
                 const { title, category, description, budget, deadline, client_email } = req.body;
 
@@ -67,35 +67,15 @@ async function run() {
                 return res.status(500).json({ message: "Internal server error." });
             }
         });
-
-        
-    } catch (error) {
-        console.error("Initialization Error:", error);
-    }
-    // The finally block is left empty so the connection remains open for your server routes!
-}
-run().catch(console.dir);
-
-// Base Route
-app.get('/', (req, res) => {
-    res.send('Hello World!');
-});
-
-app.listen(port, () => {
-    console.log(`Example app listening on port ${port}`);
-});
-
-
-
-/**
+        /**
          * 2. GET /api/tasks
          * Purpose: Retrieve tasks. Can pass an optional query parameter `email` to filter by client.
          */
-        app.get('/api/tasks', async (req, res) => {
+        app.get('/tasks', async (req, res) => {
             try {
                 const { email } = req.query;
                 let query = {};
-                
+
                 if (email) {
                     query.client_email = email;
                 }
@@ -108,10 +88,9 @@ app.listen(port, () => {
             }
         });
 
-        /**
-         * 3. PATCH /api/tasks/:id/status
-         * Purpose: Update task status (e.g., changing from 'open' to 'in-progress').
-         */
+        /* 3. PATCH /api/tasks/:id/status
+        * Purpose: Update task status (e.g., changing from 'open' to 'in-progress').
+        */
         app.patch('/api/tasks/:id/status', async (req, res) => {
             try {
                 const { id } = req.params;
@@ -137,50 +116,115 @@ app.listen(port, () => {
         });
 
         /**
-         * 4. PATCH /api/tasks/:id/deliverable
-         * Purpose: Save the final submission URL when a freelancer finishes a task.
-         */
-        app.patch('/api/tasks/:id/deliverable', async (req, res) => {
+        * 7. GET /tasks/:id
+        * Purpose: Retrieving a single task document by its Id.
+        */
+        app.get('/tasks/:id', async (req, res) => {
             try {
                 const { id } = req.params;
-                const { deliverable_url } = req.body;
 
-                if (!deliverable_url) {
-                    return res.status(400).json({ message: "Deliverable URL is required." });
+                // Ensure the ID parameter is valid for MongoDB conversion
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).json({ message: "Invalid Task ID format." });
+                }
+
+                const query = { _id: new ObjectId(id) };
+                const task = await tasksCollection.findOne(query);
+
+                if (!task) {
+                    return res.status(404).json({ message: "Task not found." });
+                }
+
+                return res.status(200).json(task);
+            } catch (error) {
+                console.error("GET /tasks/:id Error:", error);
+                return res.status(500).json({ message: "Internal server error." });
+            }
+        });
+        /**
+        * 8. PATCH /api/tasks/:id/edit
+        * Purpose: Updating a task's editable field attributes.
+        */
+        app.patch('/api/tasks/:id/edit', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const { title, description, category, budget } = req.body;
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).json({ message: "Invalid Task ID format." });
                 }
 
                 const filter = { _id: new ObjectId(id) };
-                const updateDoc = { $set: { deliverable_url: deliverable_url } };
+                const updateFields = {};
+                if (title) updateFields.title = title;
+                if (description) updateFields.description = description;
+                if (category) updateFields.category = category;
+                if (budget) updateFields.budget = Number(budget);
 
+                const updateDoc = { $set: updateFields };
                 const result = await tasksCollection.updateOne(filter, updateDoc);
+
                 if (result.matchedCount === 0) {
                     return res.status(404).json({ message: "Task not found." });
                 }
 
-                return res.status(200).json({ message: "Deliverable URL submitted successfully." });
+                return res.status(200).json({ message: "Task updated cleanly." });
             } catch (error) {
-                console.error("PATCH /api/tasks/:id/deliverable Error:", error);
+                console.error("PATCH /api/tasks/:id/edit Error:", error);
                 return res.status(500).json({ message: "Internal server error." });
             }
         });
 
         /**
-         * 5. DELETE /api/tasks/:id
-         * Purpose: Delete a task entry from the database.
+         * 9. DELETE /tasks/:id
+         * Purpose: Completely removing a task from the collection .
          */
-        app.delete('/api/tasks/:id', async (req, res) => {
+        app.delete('/tasks/:id', async (req, res) => {
             try {
                 const { id } = req.params;
-                const filter = { _id: new ObjectId(id) };
 
-                const result = await tasksCollection.deleteOne(filter);
-                if (result.deletedCount === 0) {
-                    return res.status(404).json({ message: "Task not found." });
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).json({ message: "Invalid Task ID format." });
                 }
 
-                return res.status(200).json({ message: "Task deleted from collection successfully." });
+                const query = { _id: new ObjectId(id) };
+
+                // Safety check to mirror your frontend rule (preventing deleting tasks with proposals)
+                const task = await tasksCollection.findOne(query);
+                if (!task) {
+                    return res.status(404).json({ message: "Task not found." });
+                }
+                if (task.proposals && task.proposals > 0) {
+                    return res.status(400).json({ message: "Action Blocked: Task contains active proposals." });
+                }
+
+                const result = await tasksCollection.deleteOne(query);
+                return res.status(200).json({ message: "Task removed from collection successfully." });
             } catch (error) {
-                console.error("DELETE /api/tasks/:id Error:", error);
+                console.error("DELETE /tasks/:id Error:", error);
                 return res.status(500).json({ message: "Internal server error." });
             }
         });
+
+
+
+    } catch (error) {
+        console.error("Initialization Error:", error);
+    }
+    // The finally block is left empty so the connection remains open for your server routes!
+}
+run().catch(console.dir);
+
+// Base Route
+app.get('/', (req, res) => {
+    res.send('Hello World!');
+});
+
+app.listen(port, () => {
+    console.log(`Example app listening on port ${port}`);
+});
+
+
+
+
+
