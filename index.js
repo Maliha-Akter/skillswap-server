@@ -235,9 +235,202 @@ async function run() {
                 return res.status(500).json({ message: "Internal server error." });
             }
         });
+
+        /**
+         * GET /proposals
+         * Purpose: Retrieve proposals filtered by freelancerEmail query parameter.
+         * Combines proposal data with task details to get the Task Title using an aggregation pipeline.
+         */
+        app.get('/proposals', async (req, res) => {
+            try {
+                const { freelancerEmail } = req.query;
+
+                if (!freelancerEmail) {
+                    return res.status(400).json({
+                        message: "Missing required 'freelancerEmail' query parameter."
+                    });
+                }
+
+                // Match by email, look up task title from tasks collection, and sort by most recent
+                const pipeline = [
+                    {
+                        $match: { freelancer_email: freelancerEmail }
+                    },
+                    {
+                        $lookup: {
+                            from: "tasks",
+                            localField: "task_id",
+                            foreignField: "_id",
+                            as: "taskDetails"
+                        }
+                    },
+                    {
+                        $unwind: {
+                            path: "$taskDetails",
+                            preserveNullAndEmptyArrays: true // Prevents dropping proposals if a task was somehow lost
+                        }
+                    },
+                    {
+                        $project: {
+                            _id: 1,
+                            task_id: 1,
+                            freelancer_email: 1,
+                            proposed_budget: 1,
+                            estimated_days: 1,
+                            cover_note: 1,
+                            status: 1,
+                            submitted_at: 1,
+                            taskTitle: { $ifNull: ["$taskDetails.title", "Unknown Task"] } // maps task title smoothly for frontend
+                        }
+                    },
+                    {
+                        $sort: { submitted_at: -1 }
+                    }
+                ];
+
+                const myProposals = await proposalsCollection.aggregate(pipeline).toArray();
+                return res.status(200).json(myProposals);
+
+            } catch (error) {
+                console.error("GET /proposals Error:", error);
+                return res.status(500).json({ message: "Internal server error." });
+            }
+        });
+
+        app.get('/proposals/:id', async (req, res) => {
+            try {
+                const id = req.params.id;
+                const query = { _id: new ObjectId(id) };
+
+                // 1. Get the raw proposal
+                const proposal = await proposalsCollection.findOne(query);
+
+                if (!proposal) {
+                    return res.status(404).send({ message: "Proposal not found" });
+                }
+
+                // 2. Go find the associated task's title using the task_id
+                let structuralTitle = "Unknown Task Title";
+                if (proposal.task_id) {
+                    const task = await tasksCollection.findOne({ _id: new ObjectId(proposal.task_id) });
+                    if (task && task.title) {
+                        structuralTitle = task.title;
+                    }
+                }
+
+                // 3. Combine them together so the frontend gets exactly what it's asking for
+                const cleanPayload = {
+                    ...proposal,
+                    taskTitle: structuralTitle // This matches your frontend page perfectly!
+                };
+
+                res.send(cleanPayload);
+            } catch (error) {
+                console.error(error);
+                res.status(500).send({ message: "Error fetching individual proposal data record" });
+            }
+        });
+
+        app.get('/client-proposals', async (req, res) => {
+            try {
+                const { clientEmail } = req.query;
+
+                if (!clientEmail) {
+                    return res.status(400).json({
+                        message: "Missing required 'clientEmail' query parameter."
+                    });
+                }
+
+                const pipeline = [
+                    {
+                        // 1. Join with the tasks collection using task_id fields
+                        $lookup: {
+                            from: "tasks",
+                            localField: "task_id",
+                            foreignField: "_id",
+                            as: "taskDetails"
+                        }
+                    },
+                    {
+                        // 2. Flatten the joined task array
+                        $unwind: "$taskDetails"
+                    },
+                    {
+                        // 3. Filter for tasks created by this specific client
+                        // Your tasks route uses 'client_email', so we match that here!
+                        $match: {
+                            "taskDetails.client_email": clientEmail
+                        }
+                    },
+                    {
+                        // 4. Clean up layout fields to map seamlessly to your React frontend UI
+                        $project: {
+                            _id: 1,
+                            task_id: 1,
+                            freelancer_email: 1,
+                            proposed_budget: 1,
+                            estimated_days: 1,
+                            cover_note: 1,
+                            status: 1,
+                            submitted_at: 1,
+                            taskTitle: "$taskDetails.title"
+                        }
+                    },
+                    {
+                        // 5. Sort by newest submissions first
+                        $sort: { submitted_at: -1 }
+                    }
+                ];
+
+                const incomingProposals = await proposalsCollection.aggregate(pipeline).toArray();
+                return res.status(200).json(incomingProposals);
+
+            } catch (error) {
+                console.error("GET /client-proposals Error:", error);
+                return res.status(500).json({ message: "Internal server error." });
+            }
+        });
+
+        /**
+ * GET /freelancers
+ * Purpose: Pull all user profiles whose role is set to freelancer from the database.
+ */
+        app.get('/freelancers', async (req, res) => {
+            try {
+                // Better-Auth saves records under the default 'user' or 'users' collection name
+                const usersCollection = db.collection('user');
+
+                // Find users that match your role condition and aren't blocked
+                const freelancers = await usersCollection.find({
+                    role: "freelancer",
+                    isBlocked: { $ne: true }
+                }).toArray();
+
+                return res.status(200).json(freelancers);
+            } catch (error) {
+                console.error("GET /freelancers Error:", error);
+                return res.status(500).json({ message: "Internal server error." });
+            }
+        });
+
+        /**
+         * GET /all-proposals-summary
+         * Purpose: Fetch all basic proposals to figure out job metrics metrics on browse page
+         */
+        app.get('/all-proposals-summary', async (req, res) => {
+            try {
+                const proposals = await proposalsCollection.find({}).toArray();
+                return res.status(200).json(proposals);
+            } catch (error) {
+                return res.status(500).json({ message: "Internal server error." });
+            }
+        });
+
+
     } catch (error) {
         console.error("Initialization Error:", error);
     }
+
 }
 run().catch(console.dir);
 
