@@ -5,7 +5,7 @@ const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 dotenv.config();
 
 const app = express();
-const port = process.env.PORT || 5000;
+const port = process.env.PORT || 8080;
 
 app.use(cors());
 app.use(express.json());
@@ -29,12 +29,90 @@ async function run() {
         const db = client.db('skillswap');
         const tasksCollection = db.collection('tasks');
         const proposalsCollection = db.collection('proposals');
+        
+        // NEW: Creating the payments collection reference since it wasn't there before
+        const paymentsCollection = db.collection('payments');
 
         await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
         /**
-         * 1. POST /api/tasks
+         * NEW ENDPOINT: POST /payments
+         * Purpose: Process successful payments and cascade status changes.
+         * 1. Inserts payment row into 'payments' collection
+         * 2. Updates the chosen freelancer's proposal status to 'accepted'
+         * 3. Rejects all other proposals for this specific task
+         * 4. Updates the task status to 'in_progress'
+         */
+        app.post('/payments', async (req, res) => {
+            try {
+                const { 
+                    clientEmail, 
+                    freelancerEmail, 
+                    taskId, 
+                    proposalId, 
+                    amount, 
+                    transactionId 
+                } = req.body;
+
+                // Validate request data
+                if (!clientEmail || !freelancerEmail || !taskId || !proposalId || !amount || !transactionId) {
+                    return res.status(400).json({ message: "Missing required transactional payload fields." });
+                }
+
+                if (!ObjectId.isValid(taskId) || !ObjectId.isValid(proposalId)) {
+                    return res.status(400).json({ message: "Invalid Task ID or Proposal ID format." });
+                }
+
+                const taskOId = new ObjectId(taskId);
+                const proposalOId = new ObjectId(proposalId);
+
+                // 1. Insert transaction history record into the payments collection
+                const paymentRecord = {
+                    client_email: clientEmail,
+                    freelancer_email: freelancerEmail,
+                    task_id: taskOId,
+                    amount: Number(amount),
+                    transaction_id: transactionId,
+                    payment_status: "paid",
+                    paid_at: new Date()
+                };
+                const paymentResult = await paymentsCollection.insertOne(paymentRecord);
+
+                // 2. Update the winning proposal status to "accepted"
+                await proposalsCollection.updateOne(
+                    { _id: proposalOId },
+                    { $set: { status: "accepted" } }
+                );
+
+                // 3. Reject all other proposals for this specific task row
+                await proposalsCollection.updateMany(
+                    {
+                        task_id: taskOId,
+                        _id: { $ne: proposalOId }
+                    },
+                    { $set: { status: "rejected" } }
+                );
+
+                // 4. Update the task status to "in_progress"
+                await tasksCollection.updateOne(
+                    { _id: taskOId },
+                    { $set: { status: "in_progress" } }
+                );
+
+                return res.status(201).json({
+                    message: "Payment tracked and task workflow updated to In Progress!",
+                    paymentId: paymentResult.insertedId
+                });
+
+            } catch (error) {
+                console.error("POST /payments Error:", error);
+                return res.status(500).json({ message: "Internal server error processing payment transaction." });
+            }
+        });
+
+        /**
+         * 1. POST /tasks
          * Purpose: Publish a new job block into the database collection.
          */
         app.post('/tasks', async (req, res) => {
@@ -64,29 +142,24 @@ async function run() {
                     task: newTask
                 });
             } catch (error) {
-                console.error("POST /api/tasks Error:", error);
+                console.error("POST /tasks Error:", error);
                 return res.status(500).json({ message: "Internal server error." });
             }
         });
+
         /**
-         * 2. GET /api/tasks
-         * Purpose: Retrieve tasks. Can pass an optional query parameter `email` to filter by client.
+         * 2. GET /tasks
+         * Purpose: Retrieve tasks with dynamic search, category, status, and budget filter capabilities.
          */
-        /**
- * 2. GET /tasks
- * Purpose: Retrieve tasks with dynamic search, category, status, and budget filter capabilities.
- */
         app.get('/tasks', async (req, res) => {
             try {
                 const { email, search, category, status, minBudget, maxBudget } = req.query;
                 let query = {};
 
-                // Filter by client email if provided
                 if (email) {
                     query.client_email = email;
                 }
 
-                // 1. Text Search Filter (Case-insensitive matching across Title or Description)
                 if (search) {
                     query.$or = [
                         { title: { $regex: search, $options: 'i' } },
@@ -94,25 +167,21 @@ async function run() {
                     ];
                 }
 
-                // 2. Category Filter (Supports single string or comma-separated lists from frontend)
                 if (category) {
                     const categoryArray = category.split(',');
                     query.category = { $in: categoryArray.map(cat => new RegExp(`^${cat}$`, 'i')) };
                 }
 
-                // 3. Status Filter
                 if (status) {
                     query.status = { $regex: `^${status}$`, $options: 'i' };
                 }
 
-                // 4. Budget Range Filter
                 if (minBudget || maxBudget) {
                     query.budget = {};
                     if (minBudget) query.budget.$gte = Number(minBudget);
                     if (maxBudget) query.budget.$lte = Number(maxBudget);
                 }
 
-                // Fetch data sorted by newest submissions first
                 const tasks = await tasksCollection.find(query).sort({ createdAt: -1 }).toArray();
                 return res.status(200).json(tasks);
             } catch (error) {
@@ -123,13 +192,10 @@ async function run() {
 
         /**
         * 7. GET /tasks/:id
-        * Purpose: Retrieving a single task document by its Id.
         */
         app.get('/tasks/:id', async (req, res) => {
             try {
                 const { id } = req.params;
-
-                // Ensure the ID parameter is valid for MongoDB conversion
                 if (!ObjectId.isValid(id)) {
                     return res.status(400).json({ message: "Invalid Task ID format." });
                 }
@@ -147,9 +213,9 @@ async function run() {
                 return res.status(500).json({ message: "Internal server error." });
             }
         });
+
         /**
         * 8. PATCH /api/tasks/:id/edit
-        * Purpose: Updating a task's editable field attributes.
         */
         app.patch('/api/tasks/:id/edit', async (req, res) => {
             try {
@@ -183,19 +249,15 @@ async function run() {
 
         /**
          * 9. DELETE /tasks/:id
-         * Purpose: Completely removing a task from the collection .
          */
         app.delete('/tasks/:id', async (req, res) => {
             try {
                 const { id } = req.params;
-
                 if (!ObjectId.isValid(id)) {
                     return res.status(400).json({ message: "Invalid Task ID format." });
                 }
 
                 const query = { _id: new ObjectId(id) };
-
-                // Safety check to mirror your frontend rule (preventing deleting tasks with proposals)
                 const task = await tasksCollection.findOne(query);
                 if (!task) {
                     return res.status(404).json({ message: "Task not found." });
@@ -204,7 +266,7 @@ async function run() {
                     return res.status(400).json({ message: "Action Blocked: Task contains active proposals." });
                 }
 
-                const result = await tasksCollection.deleteOne(query);
+                await tasksCollection.deleteOne(query);
                 return res.status(200).json({ message: "Task removed from collection successfully." });
             } catch (error) {
                 console.error("DELETE /tasks/:id Error:", error);
@@ -212,12 +274,13 @@ async function run() {
             }
         });
 
-        // proposals
+        /**
+         * POST /proposals
+         */
         app.post('/proposals', async (req, res) => {
             try {
                 const { taskId, freelancerEmail, proposedBudget, estimatedDays, coverNote } = req.body;
 
-                // Validation check
                 if (!taskId || !freelancerEmail || !proposedBudget || !estimatedDays || !coverNote) {
                     return res.status(400).json({ message: "Missing required fields." });
                 }
@@ -226,7 +289,6 @@ async function run() {
                     return res.status(400).json({ message: "Invalid Task ID format." });
                 }
 
-                // Verify the task exists and is open
                 const query = { _id: new ObjectId(taskId) };
                 const task = await tasksCollection.findOne(query);
 
@@ -237,7 +299,6 @@ async function run() {
                     return res.status(400).json({ message: "This task is no longer open." });
                 }
 
-                // Construct proposal data using your exact database fields
                 const proposalData = {
                     task_id: new ObjectId(taskId),
                     freelancer_email: freelancerEmail,
@@ -248,10 +309,8 @@ async function run() {
                     submitted_at: new Date()
                 };
 
-                // 1. Save proposal into database
                 const result = await proposalsCollection.insertOne(proposalData);
 
-                // 2. Add 1 to the proposal count of this task
                 await tasksCollection.updateOne(
                     query,
                     { $inc: { proposals: 1 } }
@@ -270,24 +329,16 @@ async function run() {
 
         /**
          * GET /proposals
-         * Purpose: Retrieve proposals filtered by freelancerEmail query parameter.
-         * Combines proposal data with task details to get the Task Title using an aggregation pipeline.
          */
         app.get('/proposals', async (req, res) => {
             try {
                 const { freelancerEmail } = req.query;
-
                 if (!freelancerEmail) {
-                    return res.status(400).json({
-                        message: "Missing required 'freelancerEmail' query parameter."
-                    });
+                    return res.status(400).json({ message: "Missing required 'freelancerEmail' query parameter." });
                 }
 
-                // Match by email, look up task title from tasks collection, and sort by most recent
                 const pipeline = [
-                    {
-                        $match: { freelancer_email: freelancerEmail }
-                    },
+                    { $match: { freelancer_email: freelancerEmail } },
                     {
                         $lookup: {
                             from: "tasks",
@@ -296,12 +347,7 @@ async function run() {
                             as: "taskDetails"
                         }
                     },
-                    {
-                        $unwind: {
-                            path: "$taskDetails",
-                            preserveNullAndEmptyArrays: true // Prevents dropping proposals if a task was somehow lost
-                        }
-                    },
+                    { $unwind: { path: "$taskDetails", preserveNullAndEmptyArrays: true } },
                     {
                         $project: {
                             _id: 1,
@@ -312,36 +358,33 @@ async function run() {
                             cover_note: 1,
                             status: 1,
                             submitted_at: 1,
-                            taskTitle: { $ifNull: ["$taskDetails.title", "Unknown Task"] } // maps task title smoothly for frontend
+                            taskTitle: { $ifNull: ["$taskDetails.title", "Unknown Task"] }
                         }
                     },
-                    {
-                        $sort: { submitted_at: -1 }
-                    }
+                    { $sort: { submitted_at: -1 } }
                 ];
 
                 const myProposals = await proposalsCollection.aggregate(pipeline).toArray();
                 return res.status(200).json(myProposals);
-
             } catch (error) {
                 console.error("GET /proposals Error:", error);
                 return res.status(500).json({ message: "Internal server error." });
             }
         });
 
+        /**
+         * GET /proposals/:id
+         */
         app.get('/proposals/:id', async (req, res) => {
             try {
                 const id = req.params.id;
                 const query = { _id: new ObjectId(id) };
-
-                // 1. Get the raw proposal
                 const proposal = await proposalsCollection.findOne(query);
 
                 if (!proposal) {
                     return res.status(404).send({ message: "Proposal not found" });
                 }
 
-                // 2. Go find the associated task's title using the task_id
                 let structuralTitle = "Unknown Task Title";
                 if (proposal.task_id) {
                     const task = await tasksCollection.findOne({ _id: new ObjectId(proposal.task_id) });
@@ -350,10 +393,9 @@ async function run() {
                     }
                 }
 
-                // 3. Combine them together so the frontend gets exactly what it's asking for
                 const cleanPayload = {
                     ...proposal,
-                    taskTitle: structuralTitle // This matches your frontend page perfectly!
+                    taskTitle: structuralTitle
                 };
 
                 res.send(cleanPayload);
@@ -363,19 +405,18 @@ async function run() {
             }
         });
 
+        /**
+         * GET /client-proposals
+         */
         app.get('/client-proposals', async (req, res) => {
             try {
                 const { clientEmail } = req.query;
-
                 if (!clientEmail) {
-                    return res.status(400).json({
-                        message: "Missing required 'clientEmail' query parameter."
-                    });
+                    return res.status(400).json({ message: "Missing required 'clientEmail' query parameter." });
                 }
 
                 const pipeline = [
                     {
-                        // 1. Join with the tasks collection using task_id fields
                         $lookup: {
                             from: "tasks",
                             localField: "task_id",
@@ -383,19 +424,9 @@ async function run() {
                             as: "taskDetails"
                         }
                     },
+                    { $unwind: "$taskDetails" },
+                    { $match: { "taskDetails.client_email": clientEmail } },
                     {
-                        // 2. Flatten the joined task array
-                        $unwind: "$taskDetails"
-                    },
-                    {
-                        // 3. Filter for tasks created by this specific client
-                        // Your tasks route uses 'client_email', so we match that here!
-                        $match: {
-                            "taskDetails.client_email": clientEmail
-                        }
-                    },
-                    {
-                        // 4. Clean up layout fields to map seamlessly to your React frontend UI
                         $project: {
                             _id: 1,
                             task_id: 1,
@@ -408,15 +439,11 @@ async function run() {
                             taskTitle: "$taskDetails.title"
                         }
                     },
-                    {
-                        // 5. Sort by newest submissions first
-                        $sort: { submitted_at: -1 }
-                    }
+                    { $sort: { submitted_at: -1 } }
                 ];
 
                 const incomingProposals = await proposalsCollection.aggregate(pipeline).toArray();
                 return res.status(200).json(incomingProposals);
-
             } catch (error) {
                 console.error("GET /client-proposals Error:", error);
                 return res.status(500).json({ message: "Internal server error." });
@@ -424,15 +451,11 @@ async function run() {
         });
 
         /**
- * GET /freelancers
- * Purpose: Pull all user profiles whose role is set to freelancer from the database.
- */
+         * GET /freelancers
+         */
         app.get('/freelancers', async (req, res) => {
             try {
-                // Better-Auth saves records under the default 'user' or 'users' collection name
                 const usersCollection = db.collection('user');
-
-                // Find users that match your role condition and aren't blocked
                 const freelancers = await usersCollection.find({
                     role: "freelancer",
                     isBlocked: { $ne: true }
@@ -447,7 +470,6 @@ async function run() {
 
         /**
          * GET /all-proposals-summary
-         * Purpose: Fetch all basic proposals to figure out job metrics metrics on browse page
          */
         app.get('/all-proposals-summary', async (req, res) => {
             try {
@@ -458,15 +480,12 @@ async function run() {
             }
         });
 
-
     } catch (error) {
         console.error("Initialization Error:", error);
     }
-
 }
 run().catch(console.dir);
 
-// Base Route
 app.get('/', (req, res) => {
     res.send('Hello World!');
 });
@@ -474,5 +493,3 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
     console.log(`Example app listening on port ${port}`);
 });
-
-
