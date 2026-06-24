@@ -72,19 +72,51 @@ async function run() {
          * 2. GET /api/tasks
          * Purpose: Retrieve tasks. Can pass an optional query parameter `email` to filter by client.
          */
+        /**
+ * 2. GET /tasks
+ * Purpose: Retrieve tasks with dynamic search, category, status, and budget filter capabilities.
+ */
         app.get('/tasks', async (req, res) => {
             try {
-                const { email } = req.query;
+                const { email, search, category, status, minBudget, maxBudget } = req.query;
                 let query = {};
 
+                // Filter by client email if provided
                 if (email) {
                     query.client_email = email;
                 }
 
+                // 1. Text Search Filter (Case-insensitive matching across Title or Description)
+                if (search) {
+                    query.$or = [
+                        { title: { $regex: search, $options: 'i' } },
+                        { description: { $regex: search, $options: 'i' } }
+                    ];
+                }
+
+                // 2. Category Filter (Supports single string or comma-separated lists from frontend)
+                if (category) {
+                    const categoryArray = category.split(',');
+                    query.category = { $in: categoryArray.map(cat => new RegExp(`^${cat}$`, 'i')) };
+                }
+
+                // 3. Status Filter
+                if (status) {
+                    query.status = { $regex: `^${status}$`, $options: 'i' };
+                }
+
+                // 4. Budget Range Filter
+                if (minBudget || maxBudget) {
+                    query.budget = {};
+                    if (minBudget) query.budget.$gte = Number(minBudget);
+                    if (maxBudget) query.budget.$lte = Number(maxBudget);
+                }
+
+                // Fetch data sorted by newest submissions first
                 const tasks = await tasksCollection.find(query).sort({ createdAt: -1 }).toArray();
                 return res.status(200).json(tasks);
             } catch (error) {
-                console.error("GET /api/tasks Error:", error);
+                console.error("GET /tasks Error:", error);
                 return res.status(500).json({ message: "Internal server error." });
             }
         });
@@ -442,7 +474,5 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
     console.log(`Example app listening on port ${port}`);
 });
-
-
 
 
