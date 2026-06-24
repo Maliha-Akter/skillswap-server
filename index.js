@@ -28,6 +28,7 @@ async function run() {
         // 2. Selecting database and establish collection references
         const db = client.db('skillswap');
         const tasksCollection = db.collection('tasks');
+        const proposalsCollection = db.collection('proposals');
 
         await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
@@ -84,33 +85,6 @@ async function run() {
                 return res.status(200).json(tasks);
             } catch (error) {
                 console.error("GET /api/tasks Error:", error);
-                return res.status(500).json({ message: "Internal server error." });
-            }
-        });
-
-        /* 3. PATCH /api/tasks/:id/status
-        * Purpose: Update task status (e.g., changing from 'open' to 'in-progress').
-        */
-        app.patch('/api/tasks/:id/status', async (req, res) => {
-            try {
-                const { id } = req.params;
-                const { status } = req.body;
-
-                if (!status) {
-                    return res.status(400).json({ message: "Status string is required." });
-                }
-
-                const filter = { _id: new ObjectId(id) };
-                const updateDoc = { $set: { status: status } };
-
-                const result = await tasksCollection.updateOne(filter, updateDoc);
-                if (result.matchedCount === 0) {
-                    return res.status(404).json({ message: "Task not found." });
-                }
-
-                return res.status(200).json({ message: `Task status updated to ${status}.` });
-            } catch (error) {
-                console.error("PATCH /api/tasks/:id/status Error:", error);
                 return res.status(500).json({ message: "Internal server error." });
             }
         });
@@ -206,12 +180,64 @@ async function run() {
             }
         });
 
+        // proposals
+        app.post('/proposals', async (req, res) => {
+            try {
+                const { taskId, freelancerEmail, proposedBudget, estimatedDays, coverNote } = req.body;
 
+                // Validation check
+                if (!taskId || !freelancerEmail || !proposedBudget || !estimatedDays || !coverNote) {
+                    return res.status(400).json({ message: "Missing required fields." });
+                }
 
+                if (!ObjectId.isValid(taskId)) {
+                    return res.status(400).json({ message: "Invalid Task ID format." });
+                }
+
+                // Verify the task exists and is open
+                const query = { _id: new ObjectId(taskId) };
+                const task = await tasksCollection.findOne(query);
+
+                if (!task) {
+                    return res.status(404).json({ message: "Task not found." });
+                }
+                if (task.status?.toLowerCase() !== 'open') {
+                    return res.status(400).json({ message: "This task is no longer open." });
+                }
+
+                // Construct proposal data using your exact database fields
+                const proposalData = {
+                    task_id: new ObjectId(taskId),
+                    freelancer_email: freelancerEmail,
+                    proposed_budget: Number(proposedBudget),
+                    estimated_days: Number(estimatedDays),
+                    cover_note: coverNote,
+                    status: "pending",
+                    submitted_at: new Date()
+                };
+
+                // 1. Save proposal into database
+                const result = await proposalsCollection.insertOne(proposalData);
+
+                // 2. Add 1 to the proposal count of this task
+                await tasksCollection.updateOne(
+                    query,
+                    { $inc: { proposals: 1 } }
+                );
+
+                return res.status(201).json({
+                    message: "Proposal submitted successfully!",
+                    proposalId: result.insertedId
+                });
+
+            } catch (error) {
+                console.error("POST /proposals Error:", error);
+                return res.status(500).json({ message: "Internal server error." });
+            }
+        });
     } catch (error) {
         console.error("Initialization Error:", error);
     }
-    // The finally block is left empty so the connection remains open for your server routes!
 }
 run().catch(console.dir);
 
@@ -223,7 +249,6 @@ app.get('/', (req, res) => {
 app.listen(port, () => {
     console.log(`Example app listening on port ${port}`);
 });
-
 
 
 
