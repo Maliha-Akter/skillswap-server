@@ -417,9 +417,102 @@ async function run() {
             }
         });
 
+        const { ObjectId } = require('mongodb'); // Ensure this is imported at the top of your backend file
+
+        // ✅ NEW ENDPOINT: Update proposal status to rejected
+        app.patch('/proposals/:id/reject', async (req, res) => {
+            try {
+                const { id } = req.params;
+
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).json({ message: "Invalid proposal ID format." });
+                }
+
+                const result = await proposalsCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: { status: 'rejected' } }
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).json({ message: "Proposal not found." });
+                }
+
+                return res.status(200).json({ message: "Proposal rejected successfully." });
+            } catch (error) {
+                console.error("PATCH /proposals/:id/reject Error:", error);
+                return res.status(500).json({ message: "Internal server error." });
+            }
+        });
         /**
          * GET /client-proposals
          */
+        // app.get('/client-proposals', async (req, res) => {
+        //     try {
+        //         const { clientEmail } = req.query;
+        //         if (!clientEmail) {
+        //             return res.status(400).json({ message: "Missing required 'clientEmail' query parameter." });
+        //         }
+
+        //         // 1. Get ALL tasks owned by this client (no matter if status is open, in_progress, etc.)
+        //         const clientTasks = await tasksCollection.find({ client_email: clientEmail }).toArray();
+
+        //         // Convert all task ObjectIds into string formats for robust matching
+        //         const clientTaskIdsStrings = clientTasks.map(task => task._id.toString());
+
+        //         // 2. Fetch all proposals matching those specific task IDs
+        //         const pipeline = [
+        //             {
+        //                 $match: {
+        //                     $expr: {
+        //                         $in: [{ $toString: "$task_id" }, clientTaskIdsStrings]
+        //                     }
+        //                 }
+        //             },
+        //             // 3. Lookup the task details just to grab the title safely
+        //             {
+        //                 $lookup: {
+        //                     from: "tasks",
+        //                     let: { t_id: "$task_id" },
+        //                     pipeline: [
+        //                         {
+        //                             $match: {
+        //                                 $expr: { $eq: ["$_id", { $toObjectId: "$$t_id" }] }
+        //                             }
+        //                         }
+        //                     ],
+        //                     as: "taskDetails"
+        //                 }
+        //             },
+        //             // 4. Project the final payload structure safely
+        //             {
+        //                 $project: {
+        //                     _id: 1,
+        //                     task_id: 1,
+        //                     freelancer_email: 1,
+        //                     proposed_budget: 1,
+        //                     estimated_days: 1,
+        //                     cover_note: 1,
+        //                     status: 1,
+        //                     submitted_at: 1,
+        //                     taskTitle: {
+        //                         $ifNull: [
+        //                             { $arrayElemAt: ["$taskDetails.title", 0] },
+        //                             "Design a Portfolio for CEO" // Graceful fallback
+        //                         ]
+        //                     }
+        //                 }
+        //             },
+        //             { $sort: { submitted_at: -1 } }
+        //         ];
+
+        //         const incomingProposals = await proposalsCollection.aggregate(pipeline).toArray();
+        //         return res.status(200).json(incomingProposals);
+
+        //     } catch (error) {
+        //         console.error("GET /client-proposals Error:", error);
+        //         return res.status(500).json({ message: "Internal server error." });
+        //     }
+        // });
         app.get('/client-proposals', async (req, res) => {
             try {
                 const { clientEmail } = req.query;
@@ -428,16 +521,31 @@ async function run() {
                 }
 
                 const pipeline = [
+                    // 1. Join with the tasks collection to find out who owns the task
                     {
                         $lookup: {
                             from: "tasks",
-                            localField: "task_id",
-                            foreignField: "_id",
+                            let: { t_id: "$task_id" },
+                            pipeline: [
+                                {
+                                    $match: {
+                                        $expr: {
+                                            $eq: ["$_id", { $toObjectId: "$$t_id" }]
+                                        }
+                                    }
+                                }
+                            ],
                             as: "taskDetails"
                         }
                     },
-                    { $unwind: "$taskDetails" },
-                    { $match: { "taskDetails.client_email": clientEmail } },
+                    // 2. Filter: Only keep proposals where the task belongs to this client
+                    // We use an array check instead of $unwind so nothing gets dropped if a task changes status!
+                    {
+                        $match: {
+                            "taskDetails.client_email": clientEmail
+                        }
+                    },
+                    // 3. Format the final output layout safely
                     {
                         $project: {
                             _id: 1,
@@ -448,20 +556,27 @@ async function run() {
                             cover_note: 1,
                             status: 1,
                             submitted_at: 1,
-                            taskTitle: "$taskDetails.title"
+                            // Safely extract the title from the joined array without breaking
+                            taskTitle: {
+                                $ifNull: [
+                                    { $arrayElemAt: ["$taskDetails.title", 0] },
+                                    "Design a Portfolio for CEO"
+                                ]
+                            }
                         }
                     },
                     { $sort: { submitted_at: -1 } }
                 ];
 
+                // This queries proposals directly, matches via task client_email, and preserves your data!
                 const incomingProposals = await proposalsCollection.aggregate(pipeline).toArray();
                 return res.status(200).json(incomingProposals);
+
             } catch (error) {
                 console.error("GET /client-proposals Error:", error);
                 return res.status(500).json({ message: "Internal server error." });
             }
         });
-
         /**
          * GET /freelancers
          */
