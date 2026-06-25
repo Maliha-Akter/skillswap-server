@@ -1,6 +1,7 @@
 const express = require('express');
 const dotenv = require('dotenv');
 const cors = require('cors');
+// const { ObjectId } = require('mongodb');
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 dotenv.config();
 
@@ -123,9 +124,165 @@ async function run() {
                 return res.status(500).json({ message: "Internal server error processing payment transaction." });
             }
         });
+        app.get('/freelancer-active-projects', async (req, res) => {
+    try {
+        const { email } = req.query;
+        console.log("\n==========================================");
+        console.log("📥 BACKEND: Received GET request /freelancer-active-projects");
+        console.log("📧 BACKEND: Query Email parameter:", email);
+
+        if (!email) {
+            console.warn("⚠️ BACKEND WARNING: Missing email parameter.");
+            return res.status(400).json({ message: "Missing 'email' query parameter." });
+        }
+
+        // DEBUG CHECK A: Check if any raw payments exist for this freelancer at all
+        const totalPaymentsCount = await paymentsCollection.countDocuments({ freelancer_email: email });
+        console.log(`📊 DEBUG A: Total payment rows matching freelancer email "${email}":`, totalPaymentsCount);
+
+        // DEBUG CHECK B: Check if any paid status rows exist for this freelancer
+        const paidPayments = await paymentsCollection.find({ freelancer_email: email, payment_status: "paid" }).toArray();
+        console.log(`📊 DEBUG B: Total successful 'paid' status rows matching this freelancer:`, paidPayments.length);
+
+        if (paidPayments.length > 0) {
+            console.log("🔍 DEBUG C: Sample payment object task_id values from database:", paidPayments.map(p => ({
+                paymentId: p._id,
+                task_id_raw: p.task_id,
+                type_of_task_id: typeof p.task_id
+            })));
+        }
+
+        // 3. Define pipeline execution
+        const pipeline = [
+            {
+                $match: {
+                    freelancer_email: email,
+                    payment_status: "paid"
+                }
+            },
+            {
+                $addFields: {
+                    converted_task_id: { 
+                        $toObjectId: { 
+                            $trim: { 
+                                input: { $toString: "$task_id" } // 🛠️ SAFE FIX: Force conversion to string before trimming
+                            } 
+                        } 
+                    }
+                }
+            },
+            {
+                $lookup: {
+                    from: "tasks", // ⚠️ Ensure this matches your exact MongoDB collection name case-sensitive
+                    localField: "converted_task_id",
+                    foreignField: "_id",
+                    as: "taskDetails"
+                }
+            },
+            // Temporarily comment out unwind to see if lookup fails to find a matching task item
+            // { $unwind: "$taskDetails" },
+        ];
+
+        console.log("⚙️ BACKEND: Running raw testing aggregation pipeline (without unwind filter)...");
+        const testAggregation = await paymentsCollection.aggregate(pipeline).toArray();
+
+        console.log("📦 DEBUG D: Result size before unwinding:", testAggregation.length);
+        if (testAggregation.length > 0) {
+            console.log("🔍 DEBUG E: Verification of Joined taskDetails arrays:", testAggregation.map(item => ({
+                paymentId: item._id,
+                hasTaskDetailsMatched: item.taskDetails.length > 0,
+                taskDetailsArrayLength: item.taskDetails.length
+            })));
+        }
+
+        // Final safe aggregation pipeline for output production
+        const finalPipeline = [
+            { $match: { freelancer_email: email, payment_status: "paid" } },
+            { 
+                $addFields: { 
+                    converted_task_id: { 
+                        $toObjectId: { 
+                            $trim: { 
+                                input: { $toString: "$task_id" } // 🛠️ SAFE FIX: Force conversion to string here too
+                            } 
+                        } 
+                    } 
+                } 
+            },
+            { $lookup: { from: "tasks", localField: "converted_task_id", foreignField: "_id", as: "taskDetails" } },
+            { $match: { "taskDetails.0": { $exists: true } } }, // Drop rows where task lookup failed
+            { $unwind: "$taskDetails" },
+            { $sort: { "taskDetails.createdAt": -1 } },
+            {
+                $project: {
+                    _id: 0,
+                    paymentId: "$_id",
+                    transactionId: "$transaction_id",
+                    amountPaid: "$amount",
+                    taskId: "$taskDetails._id",
+                    title: "$taskDetails.title",
+                    category: "$taskDetails.category",
+                    description: "$taskDetails.description",
+                    deadline: "$taskDetails.deadline",
+                    clientEmail: "$client_email",
+                    status: { $toLower: "$taskDetails.status" },
+                    deliverableUrl: "$taskDetails.deliverable_url"
+                }
+            }
+        ];
+
+        const activeProjects = await paymentsCollection.aggregate(finalPipeline).toArray();
+        console.log("🚀 BACKEND RESPONSE: Final processed matching rows returning to client:", activeProjects.length);
+        console.log("==========================================\n");
+
+        return res.status(200).json(activeProjects);
+    } catch (error) {
+        console.error("❌ BACKEND ERROR EXCEPTION:", error);
+        return res.status(500).json({ message: "Failed to compile active project streams." });
+    }
+});
+
         /**
-         * 1. POST /tasks
-         * Purpose: Publish a new job block into the database collection.
+         * PATCH /tasks/:id/submit-deliverable
+         * Submits assignment assets and changes job workflow state to completed
+         */
+        app.patch('/tasks/:id/submit-deliverable', async (req, res) => {
+            try {
+                const { id } = req.params;
+                const { deliverableUrl } = req.body;
+
+                if (!deliverableUrl) {
+                    return res.status(400).json({ message: "A valid submission reference link is required." });
+                }
+                if (!ObjectId.isValid(id)) {
+                    return res.status(400).json({ message: "Invalid project identifier provided." });
+                }
+
+                // FIX 3: Replaced 'db.collection('tasks')' with your global tasksCollection variable if 'db' isn't defined
+                const result = await tasksCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    {
+                        $set: {
+                            status: "Completed", // Match assignment capitalization schema rules
+                            deliverable_url: deliverableUrl,
+                            completedAt: new Date()
+                        }
+                    }
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).json({ message: "Target project task item not found." });
+                }
+
+                return res.status(200).json({ message: "Deliverable uploaded successfully and workflow closed!" });
+            } catch (error) {
+                console.error("PATCH /submit-deliverable error:", error);
+                return res.status(500).json({ message: "Internal server error updating task status." });
+            }
+        });
+        /** 
+         * 1. POST / tasks
+            * Purpose: Publish a new job block into the database collection.
          */
         app.post('/tasks', async (req, res) => {
             try {
