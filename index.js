@@ -29,7 +29,7 @@ async function run() {
         const db = client.db('skillswap');
         const tasksCollection = db.collection('tasks');
         const proposalsCollection = db.collection('proposals');
-        
+
         // NEW: Creating the payments collection reference since it wasn't there before
         const paymentsCollection = db.collection('payments');
 
@@ -46,13 +46,13 @@ async function run() {
          */
         app.post('/payments', async (req, res) => {
             try {
-                const { 
-                    clientEmail, 
-                    freelancerEmail, 
-                    taskId, 
-                    proposalId, 
-                    amount, 
-                    transactionId 
+                const {
+                    clientEmail,
+                    freelancerEmail,
+                    taskId,
+                    proposalId,
+                    amount,
+                    transactionId
                 } = req.body;
 
                 // Validate request data
@@ -66,6 +66,19 @@ async function run() {
 
                 const taskOId = new ObjectId(taskId);
                 const proposalOId = new ObjectId(proposalId);
+
+                // 🛡️ NEW STEP: Check if this client has already paid this freelancer for this specific task
+                const existingPayment = await paymentsCollection.findOne({
+                    task_id: taskOId,
+                    freelancer_email: freelancerEmail,
+                    payment_status: "paid" // Optional: ensures you only block if the past attempt actually succeeded
+                });
+
+                if (existingPayment) {
+                    return res.status(409).json({
+                        message: "Payment already processed. You have already funded this task for this freelancer."
+                    });
+                }
 
                 // 1. Insert transaction history record into the payments collection
                 const paymentRecord = {
@@ -110,7 +123,6 @@ async function run() {
                 return res.status(500).json({ message: "Internal server error processing payment transaction." });
             }
         });
-
         /**
          * 1. POST /tasks
          * Purpose: Publish a new job block into the database collection.
