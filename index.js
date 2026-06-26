@@ -33,10 +33,133 @@ async function run() {
 
         // NEW: Creating the payments collection reference since it wasn't there before
         const paymentsCollection = db.collection('payments');
+        // NEW: Creating the reviews collection reference directly
+        const reviewsCollection = db.collection('reviews');
 
         await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
+        app.post('/api/reviews', async (req, res) => {
+            try {
+                const { taskId, reviewerEmail, revieweeEmail, rating, comment } = req.body;
+
+                // Validate payload fields
+                if (!taskId || !reviewerEmail || !revieweeEmail || !rating || !comment) {
+                    return res.status(400).json({ message: "All fields are required." });
+                }
+
+                if (!ObjectId.isValid(taskId)) {
+                    return res.status(400).json({ message: "Invalid Task ID format." });
+                }
+
+                const taskOId = new ObjectId(taskId);
+
+                // Prevent duplicate reviews for the same task
+                const existingReview = await reviewsCollection.findOne({ taskId: taskOId });
+                if (existingReview) {
+                    return res.status(400).json({ message: "This task has already been reviewed." });
+                }
+
+                // Construct clean data document
+                const reviewRecord = {
+                    taskId: taskOId,
+                    reviewerEmail,
+                    revieweeEmail,
+                    rating, // Expecting: 'Very Poor', 'Poor', 'Average', 'Good', or 'Excellent'
+                    comment,
+                    createdAt: new Date()
+                };
+
+                const result = await reviewsCollection.insertOne(reviewRecord);
+
+                return res.status(201).json({
+                    message: "Review submitted successfully!",
+                    reviewId: result.insertedId
+                });
+
+            } catch (error) {
+                console.error("POST /api/reviews Error:", error);
+                return res.status(500).json({ message: "Internal server error saving feedback entry." });
+            }
+        });
+        app.get('/api/reviews', async (req, res) => {
+            try {
+                const { taskId } = req.query;
+
+                if (!taskId) {
+                    return res.status(400).json({ message: "taskId query parameter is required." });
+                }
+
+                if (!ObjectId.isValid(taskId)) {
+                    return res.status(400).json({ message: "Invalid Task ID format." });
+                }
+
+                const taskOId = new ObjectId(taskId);
+
+                // 1. Find the existing review if it exists
+                const review = await reviewsCollection.findOne({ taskId: taskOId });
+
+                // 2. Query proposal checking BOTH ObjectId and String formats to prevent silent mismatches
+                const acceptedProposal = await proposalsCollection.findOne({
+                    $or: [
+                        { task_id: taskOId },
+                        { task_id: taskId }
+                    ],
+                    status: { $in: ['accepted', 'approved', 'Accepted', 'Approved'] }
+                });
+
+                // Debugging logs — check your terminal/console when this endpoint runs!
+                console.log("=== Debugging Review Pipeline ===");
+                console.log("Target Task ID:", taskId);
+                console.log("Found Proposal Document:", acceptedProposal);
+
+                // Fallback checks just in case field names are snake_case vs camelCase
+                const freelancerEmail = acceptedProposal
+                    ? (acceptedProposal.freelancer_email || acceptedProposal.freelancerEmail)
+                    : null;
+
+                return res.status(200).json({
+                    review: review || null,
+                    revieweeEmail: freelancerEmail
+                });
+
+            } catch (error) {
+                console.error("GET /api/reviews Error:", error);
+                return res.status(500).json({ message: "Internal server error retrieving review data." });
+            }
+        });
+        /**
+         * NEW ENDPOINT: GET /tasks/:id/proposals
+         * Purpose: Fetch all active proposals linked to a target task.
+         */
+        app.get('/tasks/:id/proposals', async (req, res) => {
+            try {
+                const taskId = req.params.id;
+
+                if (!ObjectId.isValid(taskId)) {
+                    return res.status(400).json({ message: "Invalid Task ID format parameters." });
+                }
+
+                const taskOId = new ObjectId(taskId);
+
+                // Based on your post route, your field name is explicitly 'task_id' as an ObjectId
+                const query = { task_id: taskOId };
+
+                const proposals = await proposalsCollection
+                    .find(query)
+                    .sort({ submitted_at: -1 }) // ✨ FIXED: Changed from createdAt to submitted_at
+                    .toArray();
+
+                return res.status(200).json({
+                    total: proposals.length,
+                    proposals: proposals
+                });
+
+            } catch (error) {
+                console.error("GET /tasks/:id/proposals Error:", error);
+                return res.status(500).json({ message: "Internal server error fetching pipeline proposals." });
+            }
+        });
         /**
          * NEW ENDPOINT: POST /payments
          * Purpose: Process successful payments and cascade status changes.
