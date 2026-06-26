@@ -242,45 +242,90 @@ async function run() {
         });
 
         // -------------------------------------------------------------------------
-        // 📊 ADMIN OVERVIEW STATISTICS ENDPOINT
+        // 📊 ADMINISTRATIVE AGGREGATED METRICS & OVERVIEW ENDPOINT
         // -------------------------------------------------------------------------
         app.get('/api/admin/overview-stats', authAdmin, async (req, res) => {
             try {
-                // Run calculations simultaneously across collections using Promise.all
-                const [totalUsers, totalTasks, activeTasks, paymentAggregation] = await Promise.all([
-                    usersCollection.countDocuments({}),
-                    tasksCollection.countDocuments({}),
+                console.log("==> [BACKEND OVERVIEW] Aggregating multi-collection dataset streams...");
 
-                    // ✅ FIX: Changed status matching value from 'active' to '$ne: "Completed"' or "Open"
-                    // to match your real live system tracks data taxonomy accurately.
-                    tasksCollection.countDocuments({ status: { $ne: 'Completed' } }),
+                // 1. Fetch Fundamental Counts and Totals
+                const totalUsers = await usersCollection.countDocuments({});
+                const totalTasks = await tasksCollection.countDocuments({});
+                const activeTasks = await tasksCollection.countDocuments({ status: "in_progress" });
+                const completedTasks = await tasksCollection.countDocuments({ status: "Completed" });
+                const pendingProposals = await proposalsCollection.countDocuments({ status: "pending" });
+                const blockedUsers = await usersCollection.countDocuments({ isBlocked: true });
+                const successfulPayments = await paymentsCollection.countDocuments({ payment_status: "paid" });
 
-                    // Aggregate payment values to get total platform revenue
-                    paymentsCollection.aggregate([
-                        { $group: { _id: null, total: { $sum: '$price' } } }
-                    ]).toArray()
-                ]);
+                // 2. Compute Total Financial Revenue
+                const revenueAggregation = await paymentsCollection.aggregate([
+                    { $match: { payment_status: "paid" } },
+                    { $group: { _id: null, total: { $sum: "$amount" } } }
+                ]).toArray();
+                const totalRevenue = revenueAggregation[0]?.total || 0;
 
-                const totalRevenue = paymentAggregation.length > 0 ? paymentAggregation[0].total : 0;
+                // 3. Build Task Distribution Status Chart
+                const todoCount = await tasksCollection.countDocuments({ status: "todo" });
+                const inProgressCount = await tasksCollection.countDocuments({ status: "in_progress" });
+                const doneCount = await tasksCollection.countDocuments({ status: "completed" });
 
+                // 4. Generate Last 6 Months/Days Revenue Points Timeline
+                // If data is scarce, it falls back gracefully to standard increments mapped over your layout
+                const recentPaymentsList = await paymentsCollection.find({ payment_status: "paid" })
+                    .sort({ paid_at: -1 })
+                    .limit(6)
+                    .toArray();
+
+                // Map live transaction nodes into simplified date values for the UI chart bars
+                const revenueChart = recentPaymentsList.map(pay => ({
+                    date: pay.paid_at ? new Date(pay.paid_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'Recent',
+                    amount: pay.amount || 0
+                })).reverse();
+
+                // If revenue streams are empty, inject baseline historical milestones automatically
+                if (revenueChart.length === 0) {
+                    revenueChart.push({ date: 'Base', amount: 0 });
+                }
+
+                // 5. Fetch Recent Activity Feed Document Lists
+                const recentTasks = await tasksCollection.find({}).sort({ _id: -1 }).limit(5).toArray();
+                const recentUsers = await usersCollection.find({}).sort({ _id: -1 }).limit(5).toArray();
+                const recentPayments = await paymentsCollection.find({}).sort({ paid_at: -1 }).limit(5).toArray();
+
+                // 6. Return standard structured response object wrapper
                 return res.status(200).json({
                     success: true,
                     data: {
-                        totalUsers,
-                        totalTasks,
-                        totalRevenue,
-                        activeTasks
+                        stats: {
+                            totalUsers,
+                            totalTasks,
+                            totalRevenue,
+                            activeTasks,
+                            completedTasks,
+                            pendingProposals,
+                            blockedUsers,
+                            successfulPayments
+                        },
+                        revenueChart,
+                        taskStatusChart: {
+                            todo: todoCount,
+                            in_progress: inProgressCount,
+                            completed: doneCount
+                        },
+                        recentTasks,
+                        recentUsers,
+                        recentPayments
                     }
                 });
+
             } catch (error) {
-                console.error("GET /api/admin/overview-stats Error:", error);
+                console.error("❌ ==> [BACKEND AGGREGATION CRITICAL CRASH]:", error);
                 return res.status(500).json({
-                    message: "Internal server error assembling administration metrics.",
-                    error: error.message
+                    success: false,
+                    message: "Internal server fault executing multi-collection database aggregation pipeline."
                 });
             }
         });
-
 
 
         app.post('/api/reviews', async (req, res) => {
@@ -402,6 +447,31 @@ async function run() {
             } catch (error) {
                 console.error("GET /tasks/:id/proposals Error:", error);
                 return res.status(500).json({ message: "Internal server error fetching pipeline proposals." });
+            }
+        });
+        // -------------------------------------------------------------------------
+        // 💳 ADMIN TRANSACTIONS HISTORY API ENDPOINT
+        // -------------------------------------------------------------------------
+        app.get('/payments', authAdmin, async (req, res) => {
+            try {
+                console.log("==> [BACKEND] Fetching absolute Stripe payment ledger items...");
+
+                // Querying payments collection and sort by most recent transaction
+                const payments = await paymentsCollection
+                    .find({})
+                    .sort({ paid_at: -1 }) // Sort from newest to oldest
+                    .toArray();
+
+                console.log(`==> [BACKEND SUCCESS] Transmitted ${payments.length} transaction records.`);
+
+                // Return matching data layout structured for array validation check on frontend
+                return res.status(200).json(payments);
+            } catch (error) {
+                console.error("❌ ==> [BACKEND TRANSACTIONS ERROR]:", error);
+                return res.status(500).json({
+                    success: false,
+                    message: "Internal cluster exception reading database transactions matrix."
+                });
             }
         });
         /**
