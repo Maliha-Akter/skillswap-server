@@ -35,9 +35,79 @@ async function run() {
         const paymentsCollection = db.collection('payments');
         // NEW: Creating the reviews collection reference directly
         const reviewsCollection = db.collection('reviews');
+        const usersCollection = db.collection('users');
 
         await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
+
+
+        // -------------------------------------------------------------------------
+        // 🛡️ ADMIN ACCESS CONTROL MIDDLEWARE
+        // -------------------------------------------------------------------------
+        const authAdmin = async (req, res, next) => {
+            try {
+                // Get user email from incoming request headers
+                const userEmail = req.headers['user-email'];
+
+                if (!userEmail) {
+                    return res.status(401).json({ message: "Unauthorized: Missing authentication identity." });
+                }
+
+                // Query the users collection for this email
+                const user = await usersCollection.findOne({ email: userEmail });
+
+                // Check if user exists and has the string 'admin' as their role
+                if (!user || user.role !== 'admin') {
+                    return res.status(403).json({ message: "Forbidden: Administrative clearance required." });
+                }
+
+                // If they are an admin, proceed forward!
+                next();
+            } catch (error) {
+                return res.status(500).json({ message: "Internal authentication error." });
+            }
+        };
+
+        // -------------------------------------------------------------------------
+        // 📊 ADMIN OVERVIEW STATISTICS ENDPOINT
+        // -------------------------------------------------------------------------
+        app.get('/api/admin/overview-stats', authAdmin, async (req, res) => {
+            try {
+                // Run calculations simultaneously across collections using Promise.all
+                const [totalUsers, totalTasks, activeTasks, paymentAggregation] = await Promise.all([
+                    usersCollection.countDocuments({}),
+                    tasksCollection.countDocuments({}),
+                    
+                    // Count tasks where status label is explicitly active
+                    tasksCollection.countDocuments({ status: 'active' }),
+                    
+                    // Aggregate payment values to get total platform revenue
+                    paymentsCollection.aggregate([
+                        // Assumes paymentsCollection has a { status: 'Succeeded' } or similar structure
+                        { $group: { _id: null, total: { $sum: '$price' } } } // Replace '$price' with your actual numerical payment field
+                    ]).toArray()
+                ]);
+
+                // Extract numerical sum out of the aggregate array output array safely
+                const totalRevenue = paymentAggregation.length > 0 ? paymentAggregation[0].total : 0;
+
+                return res.status(200).json({
+                    success: true,
+                    data: {
+                        totalUsers,
+                        totalTasks,
+                        totalRevenue,
+                        activeTasks
+                    }
+                });
+            } catch (error) {
+                console.error("GET /api/admin/overview-stats Error:", error);
+                return res.status(500).json({ 
+                    message: "Internal server error assembling administration metrics.",
+                    error: error.message 
+                });
+            }
+        });
 
         app.post('/api/reviews', async (req, res) => {
             try {
