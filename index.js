@@ -327,7 +327,138 @@ async function run() {
             }
         });
 
+        // -------------------------------------------------------------------------
+        // 🛠️ FREELANCER AGGREGATED WORKSPACE STATISTICS & OVERVIEW PIPELINE
+        // -------------------------------------------------------------------------
+        // -------------------------------------------------------------------------
+        // 🛠️ CORRECTED FREELANCER AGGREGATED WORKSPACE STATISTICS PIPELINE
+        // -------------------------------------------------------------------------
+        app.get('/api/freelancer/overview-stats', async (req, res) => {
+            try {
+                const freelancerEmail = req.headers['user-email'];
+                if (!freelancerEmail) {
+                    return res.status(400).json({ success: false, message: "Identification header missing." });
+                }
 
+                console.log(`==> [FREELANCER OVERVIEW] Syncing dataset for: ${freelancerEmail}`);
+
+                // 1. Get proposal statuses directly from the proposals collection (using your exact schema variables)
+                // Note: Your schema snippet shows status "rejected" (lowercase). We will support both exact match and lowercase.
+                const totalProposals = await proposalsCollection.countDocuments({ freelancer_email: freelancerEmail });
+
+                const pendingProposals = await proposalsCollection.countDocuments({
+                    freelancer_email: freelancerEmail,
+                    status: { $regex: /^pending$/i } // Case-insensitive match for safety
+                });
+
+                const acceptedProposals = await proposalsCollection.countDocuments({
+                    freelancer_email: freelancerEmail,
+                    status: { $regex: /^accepted$/i }
+                });
+
+                const rejectedProposals = await proposalsCollection.countDocuments({
+                    freelancer_email: freelancerEmail,
+                    status: { $regex: /^rejected$/i }
+                });
+
+                // 2. Find all tasks that this freelancer had an accepted proposal for
+                const acceptedBids = await proposalsCollection.find({
+                    freelancer_email: freelancerEmail,
+                    status: { $regex: /^accepted$/i }
+                }).toArray();
+
+                // Extract the task IDs that belong to this freelancer
+                const freelancerTaskIds = acceptedBids.map(bid => bid.task_id);
+
+                // 3. Calculate Total Earnings from the tasks table where the task is Completed
+                // FIXED: Using your exact capitalized status: "Completed"
+                const completedTasksAggregation = await tasksCollection.aggregate([
+                    {
+                        $match: {
+                            _id: { $in: freelancerTaskIds },
+                            status: "Completed" // 💎 EXACT CAPITALIZATION MATCH FROM YOUR DB
+                        }
+                    },
+                    { $group: { _id: null, total: { $sum: "$budget" } } }
+                ]).toArray();
+
+                const totalEarnings = completedTasksAggregation[0]?.total || 0;
+
+                // 4. Build Earnings History Stream using completed tasks
+                const completedTasksList = await tasksCollection.find({
+                    _id: { $in: freelancerTaskIds },
+                    status: "Completed"
+                })
+                    .sort({ completedAt: -1 }) // Sorting by your schema's completedAt timestamp
+                    .limit(6)
+                    .toArray();
+
+                const earningsChart = completedTasksList.map(task => ({
+                    date: task.completedAt ? new Date(task.completedAt).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'Recent',
+                    amount: task.budget || 0
+                })).reverse();
+
+                if (earningsChart.length === 0) {
+                    earningsChart.push({ date: 'Initiated', amount: 0 });
+                }
+
+                // 5. Fetch Horizontal Row Feeds for the UI
+                // Row Feed A: Recent Proposals submitted by this freelancer
+                const recentProposalsRaw = await proposalsCollection.find({ freelancer_email: freelancerEmail })
+                    .sort({ submitted_at: -1 }) // Uses your schema's submitted_at property
+                    .limit(5)
+                    .toArray();
+
+                // Map proposals and join task titles so your frontend has a project title to show
+                const recentProposals = await Promise.all(recentProposalsRaw.map(async (prop) => {
+                    const taskInfo = await tasksCollection.findOne({ _id: prop.task_id });
+                    return {
+                        _id: prop._id,
+                        taskTitle: taskInfo ? taskInfo.title : "Unknown Assignment Brief",
+                        bidAmount: prop.proposed_budget, // Uses your schema's proposed_budget variable
+                        coverLetter: prop.cover_note,     // Uses your schema's cover_note variable
+                        status: prop.status
+                    };
+                }));
+
+                // Row Feed B: Active Ongoing Contracts (Tasks that are accepted but not completed yet)
+                const activeContracts = await tasksCollection.find({
+                    _id: { $in: freelancerTaskIds },
+                    status: { $ne: "Completed" } // Anything not completed yet is considered processing
+                })
+                    .sort({ createdAt: -1 })
+                    .limit(5)
+                    .toArray();
+
+                // 6. Return the safe response package payload
+                return res.status(200).json({
+                    success: true,
+                    data: {
+                        stats: {
+                            totalProposals,
+                            pendingProposals,
+                            acceptedProposals,
+                            totalEarnings
+                        },
+                        earningsChart,
+                        proposalStatusChart: {
+                            pending: pendingProposals,
+                            accepted: acceptedProposals,
+                            rejected: rejectedProposals
+                        },
+                        recentProposals,
+                        activeContracts
+                    }
+                });
+
+            } catch (error) {
+                console.error("❌ ==> [BACKEND FREELANCER AGGREGATION FAILURE]:", error);
+                return res.status(500).json({
+                    success: false,
+                    message: "Internal server error gathering aggregate data pipeline workflows."
+                });
+            }
+        });
         app.post('/api/reviews', async (req, res) => {
             try {
                 const { taskId, reviewerEmail, revieweeEmail, rating, comment } = req.body;
