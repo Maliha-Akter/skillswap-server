@@ -393,7 +393,107 @@ async function run() {
                 return res.status(500).json({ message: "Internal server error reading task details." });
             }
         });
-       
+        app.get('/client-payment-history', async (req, res) => {
+            try {
+                const { email } = req.query;
+
+                console.log("\n==========================================");
+                console.log("📥 CLIENT LEDGER: Received GET request /client-payment-history");
+                console.log("📧 CLIENT LEDGER: Query Email parameter:", email);
+
+                if (!email) {
+                    console.warn("⚠️ CLIENT LEDGER WARNING: Missing email parameter.");
+                    return res.status(400).json({ message: "Missing client 'email' query parameter." });
+                }
+
+                // DEBUG STEP 1: Find raw documents to check if data fields exist under alternative names
+                const rawPaymentsCount = await paymentsCollection.countDocuments({ client_email: email });
+                console.log(`📊 DEBUG 1: Raw payments matching 'client_email': ${rawPaymentsCount}`);
+
+                // If zero, check if it's stored under a camelCase field name instead
+                if (rawPaymentsCount === 0) {
+                    const alternateCount = await paymentsCollection.countDocuments({ clientEmail: email });
+                    console.log(`📊 DEBUG 1-ALT: Raw payments matching alternate 'clientEmail': ${alternateCount}`);
+                }
+
+                const samplePayments = await paymentsCollection.find({
+                    $or: [{ client_email: email }, { clientEmail: email }]
+                }).limit(2).toArray();
+
+                console.log("🔍 DEBUG 2: Structural sample of your payments collection fields:", JSON.stringify(samplePayments, null, 2));
+
+                // 3. Robust Execution Pipeline with Fallbacks
+                const pipeline = [
+                    {
+                        $match: {
+                            $or: [
+                                { client_email: email },
+                                { clientEmail: email }
+                            ]
+                        }
+                    },
+                    {
+                        $addFields: {
+                            safe_task_id: { $ifNull: ["$task_id", "$taskId"] },
+                            safe_freelancer: { $ifNull: ["$freelancer_email", "$freelancerEmail"] },
+                            safe_amount: { $ifNull: ["$amount", "$amountPaid"] },
+                            safe_status: { $ifNull: ["$payment_status", "$status"] },
+                            // 🛠️ UPDATE THIS LINE to include "$paid_at":
+                            safe_date: { $ifNull: ["$paid_at", "$payment_date", "$createdAt", "$date"] }
+                        }
+                    },
+                    {
+                        $addFields: {
+                            converted_task_id: {
+                                $toObjectId: {
+                                    $trim: {
+                                        input: { $toString: "$safe_task_id" }
+                                    }
+                                }
+                            }
+                        }
+                    },
+                    {
+                        $lookup: {
+                            from: "tasks",
+                            localField: "converted_task_id",
+                            foreignField: "_id",
+                            as: "taskDetails"
+                        }
+                    },
+                    // Use preserveNullAndEmptyArrays so the row isn't destroyed if the task lookup fails
+                    { $unwind: { path: "$taskDetails", preserveNullAndEmptyArrays: true } },
+                    {
+                        $project: {
+                            _id: 0,
+                            paymentId: { $ifNull: ["$_id", "N/A"] },
+                            taskId: { $ifNull: ["$taskDetails._id", "$safe_task_id"] },
+                            taskName: { $ifNull: ["$taskDetails.title", "Unknown / Archived Task Spec"] },
+                            freelancerEmail: { $ifNull: ["$safe_freelancer", "Not Assigned"] },
+                            amount: { $ifNull: ["$safe_amount", 0] },
+                            status: { $ifNull: ["$safe_status", "paid"] },
+                            date: { $ifNull: ["$safe_date", null] }
+                        }
+                    }
+                ];
+
+                console.log("⚙️ CLIENT LEDGER: Processing main aggregate pipelines...");
+                const paymentHistory = await paymentsCollection.aggregate(pipeline).toArray();
+                console.log(`🚀 CLIENT LEDGER SUCCESS: Sending ${paymentHistory.length} records back to client frontend UI.`);
+                console.log("==========================================\n");
+
+                const totalSpent = paymentHistory.reduce((sum, item) => sum + (自由 = Number(item.amount) || 0), 0);
+
+                return res.status(200).json({
+                    history: paymentHistory,
+                    totalSpent
+                });
+
+            } catch (error) {
+                console.error("❌ CLIENT LEDGER CRITICAL EXCEPTION:", error);
+                return res.status(500).json({ message: "Failed to compile client ledger streams." });
+            }
+        });
         /** 
          * 1. POST / tasks
             * Purpose: Publish a new job block into the database collection.
