@@ -459,6 +459,74 @@ async function run() {
                 });
             }
         });
+        // -------------------------------------------------------------------------
+        // 🛠️ CLIENT AGGREGATED WORKSPACE STATISTICS PIPELINE
+        // -------------------------------------------------------------------------
+        app.get('/api/client/overview-stats', async (req, res) => {
+            try {
+                const clientEmail = req.headers['user-email'];
+                if (!clientEmail) {
+                    return res.status(400).json({ success: false, message: "Identification header missing." });
+                }
+
+                console.log(`==> [CLIENT OVERVIEW] Syncing dataset for: ${clientEmail}`);
+
+                // 1. Core Task Counts matching your specific layout requirements
+                const totalTasks = await tasksCollection.countDocuments({ client_email: clientEmail });
+
+                // Open Tasks = Tasks that are still in "todo" or looking for bids
+                const openTasks = await tasksCollection.countDocuments({
+                    client_email: clientEmail,
+                    status: { $regex: /^open$/i }
+                });
+
+                // Tasks In Progress = Active contracts currently being built
+                const tasksInProgress = await tasksCollection.countDocuments({
+                    client_email: clientEmail,
+                    status: { $regex: /^in_progress$/i }
+                });
+
+                // 2. Total Spent = Sum of budgets from tasks that are officially finished
+                const completedExpenditure = await tasksCollection.aggregate([
+                    {
+                        $match: {
+                            client_email: clientEmail,
+                            status: "Completed" // Exact capitalization match from your database schema
+                        }
+                    },
+                    { $group: { _id: null, total: { $sum: "$budget" } } }
+                ]).toArray();
+
+                const totalSpent = completedExpenditure[0]?.total || 0;
+
+                // 3. Optional: Extra telemetry structures to keep layout uniform with your feeds
+                const recentTasks = await tasksCollection.find({ client_email: clientEmail })
+                    .sort({ createdAt: -1 })
+                    .limit(5)
+                    .toArray();
+
+                // 4. Safely package and dispatch the data matrix response
+                return res.status(200).json({
+                    success: true,
+                    data: {
+                        stats: {
+                            totalTasks,
+                            openTasks,
+                            tasksInProgress,
+                            totalSpent
+                        },
+                        recentTasks
+                    }
+                });
+
+            } catch (error) {
+                console.error("❌ ==> [BACKEND CLIENT AGGREGATION FAILURE]:", error);
+                return res.status(500).json({
+                    success: false,
+                    message: "Internal server error gathering aggregate client workflow metrics."
+                });
+            }
+        });
         app.post('/api/reviews', async (req, res) => {
             try {
                 const { taskId, reviewerEmail, revieweeEmail, rating, comment } = req.body;
