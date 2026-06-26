@@ -35,39 +35,101 @@ async function run() {
         const paymentsCollection = db.collection('payments');
         // NEW: Creating the reviews collection reference directly
         const reviewsCollection = db.collection('reviews');
-        const usersCollection = db.collection('users');
+        const usersCollection = db.collection('user');
 
         await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
 
         // -------------------------------------------------------------------------
-        // 🛡️ ADMIN ACCESS CONTROL MIDDLEWARE
+        // 🛡️ ADMIN ACCESS CONTROL MIDDLEWARE (Must be defined before using it!)
+        // -------------------------------------------------------------------------
+        // -------------------------------------------------------------------------
+        // 🛡️ ADMIN ACCESS CONTROL MIDDLEWARE (Environment Controlled)
         // -------------------------------------------------------------------------
         const authAdmin = async (req, res, next) => {
             try {
-                // Get user email from incoming request headers
                 const userEmail = req.headers['user-email'];
+                console.log("==> [BACKEND AUTH] Checking verification header for email:", userEmail);
 
                 if (!userEmail) {
-                    return res.status(401).json({ message: "Unauthorized: Missing authentication identity." });
+                    return res.status(401).json({ message: "Unauthorized: Missing identity header." });
                 }
 
-                // Query the users collection for this email
-                const user = await usersCollection.findOne({ email: userEmail });
+                // 1. Parse admin emails array from your environment variables configuration
+                const envAdminEmails = process.env.ADMIN_EMAILS 
+                    ? process.env.ADMIN_EMAILS.split(',').map(email => email.trim().toLowerCase())
+                    : [];
 
-                // Check if user exists and has the string 'admin' as their role
+                const incomingEmailLower = userEmail.toLowerCase();
+
+                // 2. STAGE A Validation: Instant match if found in our safe env list
+                if (envAdminEmails.includes(incomingEmailLower)) {
+                    console.log(`==> [BACKEND AUTH] Authorized master access via environment mapping rule for: ${userEmail}`);
+                    return next();
+                }
+
+                // 3. STAGE B Validation: Standard fallback collection lookup matching your "user" table
+                const user = await usersCollection.findOne({ email: userEmail });
+                console.log("==> [BACKEND AUTH] Database user lookup record resolved:", user);
+
                 if (!user || user.role !== 'admin') {
+                    console.log(`==> [BACKEND AUTH] Denied. Found Role: ${user ? user.role : 'None'}`);
                     return res.status(403).json({ message: "Forbidden: Administrative clearance required." });
                 }
 
-                // If they are an admin, proceed forward!
+                console.log(`==> [BACKEND AUTH] Authorized database role check matching administration context.`);
                 next();
             } catch (error) {
+                console.error("==> [BACKEND AUTH CRITICAL ERROR]:", error);
                 return res.status(500).json({ message: "Internal authentication error." });
             }
         };
 
+        // -------------------------------------------------------------------------
+        // 👥 ADMIN: FETCH & FILTER USERS ENDPOINT
+        // -------------------------------------------------------------------------
+        app.get('/api/admin/users', authAdmin, async (req, res) => {
+            try {
+                const { search, role } = req.query;
+                console.log(`==> [BACKEND GET /api/admin/users] Query params received - Search: "${search || ''}", Role: "${role || ''}"`);
+
+                let query = {};
+
+                if (search) {
+                    query.$or = [
+                        { name: { $regex: search, $options: 'i' } },
+                        { email: { $regex: search, $options: 'i' } }
+                    ];
+                }
+
+                if (role && role !== 'all') {
+                    query.role = role.toLowerCase();
+                }
+
+                console.log("==> [BACKEND] Executing MongoDB user query:", JSON.stringify(query));
+
+                const users = await usersCollection
+                    .find(query)
+                    .sort({ createdAt: -1 })
+                    .toArray();
+
+                console.log(`==> [BACKEND] Query completed successfully. Returning ${users.length} user documents.`);
+
+                return res.status(200).json({
+                    success: true,
+                    data: users
+                });
+            } catch (error) {
+                console.error("==> [BACKEND CRITICAL ROUTE ERROR] GET /api/admin/users:", error);
+                return res.status(500).json({
+                    success: false,
+                    message: "Failed to load platform accounts collection.",
+                    error: error.message
+                });
+            }
+        });
+        
         // -------------------------------------------------------------------------
         // 📊 ADMIN OVERVIEW STATISTICS ENDPOINT
         // -------------------------------------------------------------------------
@@ -77,10 +139,10 @@ async function run() {
                 const [totalUsers, totalTasks, activeTasks, paymentAggregation] = await Promise.all([
                     usersCollection.countDocuments({}),
                     tasksCollection.countDocuments({}),
-                    
+
                     // Count tasks where status label is explicitly active
                     tasksCollection.countDocuments({ status: 'active' }),
-                    
+
                     // Aggregate payment values to get total platform revenue
                     paymentsCollection.aggregate([
                         // Assumes paymentsCollection has a { status: 'Succeeded' } or similar structure
@@ -102,9 +164,9 @@ async function run() {
                 });
             } catch (error) {
                 console.error("GET /api/admin/overview-stats Error:", error);
-                return res.status(500).json({ 
+                return res.status(500).json({
                     message: "Internal server error assembling administration metrics.",
-                    error: error.message 
+                    error: error.message
                 });
             }
         });
