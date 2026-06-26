@@ -1,7 +1,7 @@
 const express = require('express');
 const dotenv = require('dotenv');
 const cors = require('cors');
-// const { ObjectId } = require('mongodb');
+// ✅ FIX: Combined both imports into a single clean line to prevent Syntax/Redeclaration crashes
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 dotenv.config();
 
@@ -30,10 +30,7 @@ async function run() {
         const db = client.db('skillswap');
         const tasksCollection = db.collection('tasks');
         const proposalsCollection = db.collection('proposals');
-
-        // NEW: Creating the payments collection reference since it wasn't there before
         const paymentsCollection = db.collection('payments');
-        // NEW: Creating the reviews collection reference directly
         const reviewsCollection = db.collection('reviews');
         const usersCollection = db.collection('user');
 
@@ -42,10 +39,7 @@ async function run() {
 
 
         // -------------------------------------------------------------------------
-        // 🛡️ ADMIN ACCESS CONTROL MIDDLEWARE (Must be defined before using it!)
-        // -------------------------------------------------------------------------
-        // -------------------------------------------------------------------------
-        // 🛡️ ADMIN ACCESS CONTROL MIDDLEWARE (Environment Controlled)
+        // 🛡️ ADMIN ACCESS CONTROL MIDDLEWARE
         // -------------------------------------------------------------------------
         const authAdmin = async (req, res, next) => {
             try {
@@ -57,7 +51,7 @@ async function run() {
                 }
 
                 // 1. Parse admin emails array from your environment variables configuration
-                const envAdminEmails = process.env.ADMIN_EMAILS 
+                const envAdminEmails = process.env.ADMIN_EMAILS
                     ? process.env.ADMIN_EMAILS.split(',').map(email => email.trim().toLowerCase())
                     : [];
 
@@ -129,7 +123,124 @@ async function run() {
                 });
             }
         });
-        
+
+        // -------------------------------------------------------------------------
+        // 🚫 ADMIN: TOGGLE USER BLOCK/UNBLOCK PERMISSIONS STATUS
+        // -------------------------------------------------------------------------
+        app.patch('/api/admin/users/:id/block', authAdmin, async (req, res) => {
+            try {
+                const { id } = req.params;
+                const { isBlocked } = req.body;
+
+                if (typeof isBlocked !== 'boolean') {
+                    return res.status(400).json({
+                        success: false,
+                        message: "Invalid status parameters payload format. Property must be boolean value."
+                    });
+                }
+
+                const result = await usersCollection.updateOne(
+                    { _id: new ObjectId(id) },
+                    { $set: { isBlocked } }
+                );
+
+                if (result.matchedCount === 0) {
+                    return res.status(404).json({
+                        success: false,
+                        message: "Target user account not found."
+                    });
+                }
+
+                return res.status(200).json({
+                    success: true,
+                    message: `User ${isBlocked ? "Blocked" : "Active"} successfully.`
+                });
+
+            } catch (error) {
+                console.error(error);
+                return res.status(500).json({
+                    success: false,
+                    message: error.message
+                });
+            }
+        });
+
+        // 🟢 GET ALL TASKS PIPELINE (WITH FILTERING & ADMINISTRATIVE AUDITING)
+        app.get("/api/admin/tasks", authAdmin, async (req, res) => {
+            try {
+                const { search, categories, status, minBudget, maxBudget } = req.query;
+
+                console.log("==================================================");
+                console.log("==> [INCOMING REQ] GET /api/admin/tasks");
+                console.log("    Raw Query Params:", { search, categories, status, minBudget, maxBudget });
+
+                let query = {};
+
+                // 1. Debounced Text Title Search
+                if (search) {
+                    query.title = { $regex: search, $options: "i" };
+                }
+
+                // 2. Categories Multi-Select Checkboxes
+                if (categories) {
+                    const categoryList = categories.split(",");
+                    if (categoryList.length > 0 && categoryList[0] !== "") {
+                        query.category = { $in: categoryList };
+                    }
+                }
+
+                // 3. Live Status Tracks (Open, in_progress, Completed)
+                if (status && status.toLowerCase() !== "all") {
+                    query.status = { $regex: new RegExp(`^${status}$`, "i") };
+                }
+
+                // 4. Budget Range Tiers & Custom Bounds
+                if (minBudget || maxBudget) {
+                    query.budget = {};
+                    if (minBudget) query.budget.$gte = parseFloat(minBudget);
+                    if (maxBudget) query.budget.$lte = parseFloat(maxBudget);
+                }
+
+                console.log("==> [MONGO QUERY] Generated Filter Object:");
+                console.dir(query, { depth: null });
+
+                const tasks = await tasksCollection.find(query).sort({ createdAt: -1 }).toArray();
+
+                console.log(`==> [MONGO RESULT] Successfully fetched ${tasks.length} task row documents.`);
+                console.log("==================================================");
+
+                res.status(200).json({
+                    success: true,
+                    data: tasks
+                });
+            } catch (error) {
+                console.error("❌ ==> [CRITICAL ROUTE ERROR] GET /api/admin/tasks:", error);
+                res.status(500).json({ success: false, message: error.message });
+            }
+        });
+
+        // 🔴 DELETE TASK ITEM ROW (SAFETY GUIDELINES / VIOLATIONS TERMINATION)
+        // ✅ Added authAdmin protection here too so standard users can't delete items using tools like Postman!
+        app.delete("/api/admin/tasks/:id", authAdmin, async (req, res) => {
+            try {
+                const { id } = req.params;
+
+                // Uses the top-level inherited or safely imported ObjectId reference
+                const result = await tasksCollection.deleteOne({ _id: new ObjectId(id) });
+
+                if (result.deletedCount === 1) {
+                    res.status(200).json({
+                        success: true,
+                        message: "Task item removed permanently due to platform safety violations."
+                    });
+                } else {
+                    res.status(404).json({ success: false, message: "Requested task document profile not found." });
+                }
+            } catch (error) {
+                res.status(500).json({ success: false, message: error.message });
+            }
+        });
+
         // -------------------------------------------------------------------------
         // 📊 ADMIN OVERVIEW STATISTICS ENDPOINT
         // -------------------------------------------------------------------------
@@ -140,17 +251,16 @@ async function run() {
                     usersCollection.countDocuments({}),
                     tasksCollection.countDocuments({}),
 
-                    // Count tasks where status label is explicitly active
-                    tasksCollection.countDocuments({ status: 'active' }),
+                    // ✅ FIX: Changed status matching value from 'active' to '$ne: "Completed"' or "Open"
+                    // to match your real live system tracks data taxonomy accurately.
+                    tasksCollection.countDocuments({ status: { $ne: 'Completed' } }),
 
                     // Aggregate payment values to get total platform revenue
                     paymentsCollection.aggregate([
-                        // Assumes paymentsCollection has a { status: 'Succeeded' } or similar structure
-                        { $group: { _id: null, total: { $sum: '$price' } } } // Replace '$price' with your actual numerical payment field
+                        { $group: { _id: null, total: { $sum: '$price' } } }
                     ]).toArray()
                 ]);
 
-                // Extract numerical sum out of the aggregate array output array safely
                 const totalRevenue = paymentAggregation.length > 0 ? paymentAggregation[0].total : 0;
 
                 return res.status(200).json({
@@ -170,6 +280,8 @@ async function run() {
                 });
             }
         });
+
+
 
         app.post('/api/reviews', async (req, res) => {
             try {
@@ -737,7 +849,8 @@ async function run() {
                 console.log(`🚀 CLIENT LEDGER SUCCESS: Sending ${paymentHistory.length} records back to client frontend UI.`);
                 console.log("==========================================\n");
 
-                const totalSpent = paymentHistory.reduce((sum, item) => sum + (自由 = Number(item.amount) || 0), 0);
+                // const totalSpent = paymentHistory.reduce((sum, item) => sum + (自由 = Number(item.amount) || 0), 0);
+                const totalSpent = paymentHistory.reduce((sum, item) => sum + (Number(item.amount) || 0), 0);
 
                 return res.status(200).json({
                     history: paymentHistory,
@@ -1043,7 +1156,7 @@ async function run() {
             }
         });
 
-        const { ObjectId } = require('mongodb'); // Ensure this is imported at the top of your backend file
+        // const { ObjectId } = require('mongodb'); // Ensure this is imported at the top of your backend file
 
         // ✅ NEW ENDPOINT: Update proposal status to rejected
         app.patch('/proposals/:id/reject', async (req, res) => {
@@ -1069,76 +1182,7 @@ async function run() {
                 return res.status(500).json({ message: "Internal server error." });
             }
         });
-        /**
-         * GET /client-proposals
-         */
-        // app.get('/client-proposals', async (req, res) => {
-        //     try {
-        //         const { clientEmail } = req.query;
-        //         if (!clientEmail) {
-        //             return res.status(400).json({ message: "Missing required 'clientEmail' query parameter." });
-        //         }
 
-        //         // 1. Get ALL tasks owned by this client (no matter if status is open, in_progress, etc.)
-        //         const clientTasks = await tasksCollection.find({ client_email: clientEmail }).toArray();
-
-        //         // Convert all task ObjectIds into string formats for robust matching
-        //         const clientTaskIdsStrings = clientTasks.map(task => task._id.toString());
-
-        //         // 2. Fetch all proposals matching those specific task IDs
-        //         const pipeline = [
-        //             {
-        //                 $match: {
-        //                     $expr: {
-        //                         $in: [{ $toString: "$task_id" }, clientTaskIdsStrings]
-        //                     }
-        //                 }
-        //             },
-        //             // 3. Lookup the task details just to grab the title safely
-        //             {
-        //                 $lookup: {
-        //                     from: "tasks",
-        //                     let: { t_id: "$task_id" },
-        //                     pipeline: [
-        //                         {
-        //                             $match: {
-        //                                 $expr: { $eq: ["$_id", { $toObjectId: "$$t_id" }] }
-        //                             }
-        //                         }
-        //                     ],
-        //                     as: "taskDetails"
-        //                 }
-        //             },
-        //             // 4. Project the final payload structure safely
-        //             {
-        //                 $project: {
-        //                     _id: 1,
-        //                     task_id: 1,
-        //                     freelancer_email: 1,
-        //                     proposed_budget: 1,
-        //                     estimated_days: 1,
-        //                     cover_note: 1,
-        //                     status: 1,
-        //                     submitted_at: 1,
-        //                     taskTitle: {
-        //                         $ifNull: [
-        //                             { $arrayElemAt: ["$taskDetails.title", 0] },
-        //                             "Design a Portfolio for CEO" // Graceful fallback
-        //                         ]
-        //                     }
-        //                 }
-        //             },
-        //             { $sort: { submitted_at: -1 } }
-        //         ];
-
-        //         const incomingProposals = await proposalsCollection.aggregate(pipeline).toArray();
-        //         return res.status(200).json(incomingProposals);
-
-        //     } catch (error) {
-        //         console.error("GET /client-proposals Error:", error);
-        //         return res.status(500).json({ message: "Internal server error." });
-        //     }
-        // });
         app.get('/client-proposals', async (req, res) => {
             try {
                 const { clientEmail } = req.query;
@@ -1208,8 +1252,8 @@ async function run() {
          */
         app.get('/freelancers', async (req, res) => {
             try {
-                const usersCollection = db.collection('user');
-                const freelancers = await usersCollection.find({
+                // Use the client reference directly to establish scope safely
+                const freelancers = await client.db('skillswap').collection('user').find({
                     role: "freelancer",
                     isBlocked: { $ne: true }
                 }).toArray();
@@ -1224,6 +1268,12 @@ async function run() {
         /**
          * GET /all-proposals-summary
          */
+        // -------------------------------------------------------------------------
+        // 📋 PUBLIC PROPOSALS SUMMARY API ENDPOINT
+        // -------------------------------------------------------------------------
+        // -------------------------------------------------------------------------
+        // 📋 PUBLIC PROPOSALS SUMMARY API ENDPOINT
+        // -------------------------------------------------------------------------
         app.get('/all-proposals-summary', async (req, res) => {
             try {
                 const proposals = await proposalsCollection.find({}).toArray();
@@ -1237,12 +1287,11 @@ async function run() {
         console.error("Initialization Error:", error);
     }
 }
+
+// Invoke the setup runner safely
 run().catch(console.dir);
 
-app.get('/', (req, res) => {
-    res.send('Hello World!');
-});
-
+// Start the server
 app.listen(port, () => {
-    console.log(`Example app listening on port ${port}`);
+    console.log(`Server listening context safely on port ${port}`);
 });
