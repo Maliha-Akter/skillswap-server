@@ -127,29 +127,9 @@ async function run() {
         app.get('/freelancer-active-projects', async (req, res) => {
             try {
                 const { email } = req.query;
-                console.log("\n==========================================");
-                console.log("📥 BACKEND: Received GET request /freelancer-active-projects");
-                console.log("📧 BACKEND: Query Email parameter:", email);
 
                 if (!email) {
-                    console.warn("⚠️ BACKEND WARNING: Missing email parameter.");
                     return res.status(400).json({ message: "Missing 'email' query parameter." });
-                }
-
-                // DEBUG CHECK A: Check if any raw payments exist for this freelancer at all
-                const totalPaymentsCount = await paymentsCollection.countDocuments({ freelancer_email: email });
-                console.log(`📊 DEBUG A: Total payment rows matching freelancer email "${email}":`, totalPaymentsCount);
-
-                // DEBUG CHECK B: Check if any paid status rows exist for this freelancer
-                const paidPayments = await paymentsCollection.find({ freelancer_email: email, payment_status: "paid" }).toArray();
-                console.log(`📊 DEBUG B: Total successful 'paid' status rows matching this freelancer:`, paidPayments.length);
-
-                if (paidPayments.length > 0) {
-                    console.log("🔍 DEBUG C: Sample payment object task_id values from database:", paidPayments.map(p => ({
-                        paymentId: p._id,
-                        task_id_raw: p.task_id,
-                        type_of_task_id: typeof p.task_id
-                    })));
                 }
 
                 // 3. Define pipeline execution
@@ -165,7 +145,7 @@ async function run() {
                             converted_task_id: {
                                 $toObjectId: {
                                     $trim: {
-                                        input: { $toString: "$task_id" } // 🛠️ SAFE FIX: Force conversion to string before trimming
+                                        input: { $toString: "$task_id" }
                                     }
                                 }
                             }
@@ -173,27 +153,15 @@ async function run() {
                     },
                     {
                         $lookup: {
-                            from: "tasks", // ⚠️ Ensure this matches your exact MongoDB collection name case-sensitive
+                            from: "tasks",
                             localField: "converted_task_id",
                             foreignField: "_id",
                             as: "taskDetails"
                         }
                     },
-                    // Temporarily comment out unwind to see if lookup fails to find a matching task item
-                    // { $unwind: "$taskDetails" },
                 ];
 
-                console.log("⚙️ BACKEND: Running raw testing aggregation pipeline (without unwind filter)...");
                 const testAggregation = await paymentsCollection.aggregate(pipeline).toArray();
-
-                console.log("📦 DEBUG D: Result size before unwinding:", testAggregation.length);
-                if (testAggregation.length > 0) {
-                    console.log("🔍 DEBUG E: Verification of Joined taskDetails arrays:", testAggregation.map(item => ({
-                        paymentId: item._id,
-                        hasTaskDetailsMatched: item.taskDetails.length > 0,
-                        taskDetailsArrayLength: item.taskDetails.length
-                    })));
-                }
 
                 // Final safe aggregation pipeline for output production
                 const finalPipeline = [
@@ -203,137 +171,154 @@ async function run() {
                             converted_task_id: {
                                 $toObjectId: {
                                     $trim: {
-                                        input: { $toString: "$task_id" } // 🛠️ SAFE FIX: Force conversion to string here too
+                                        input: { $toString: "$task_id" }
                                     }
                                 }
                             }
                         }
                     },
                     { $lookup: { from: "tasks", localField: "converted_task_id", foreignField: "_id", as: "taskDetails" } },
-                    { $match: { "taskDetails.0": { $exists: true } } }, // Drop rows where task lookup failed
+                    { $match: { "taskDetails.0": { $exists: true } } },
                     { $unwind: "$taskDetails" },
-                    { $sort: { "taskDetails.createdAt": -1 } },
+
+                    // 🛠️ FIX: Combine rows sharing the exact same task ID to completely prevent duplicates
+                    {
+                        $group: {
+                            _id: "$taskDetails._id",
+                            paymentId: { $first: "$_id" },
+                            transactionId: { $first: "$transaction_id" },
+                            amountPaid: { $first: "$amount" },
+                            title: { $first: "$taskDetails.title" },
+                            category: { $first: "$taskDetails.category" },
+                            description: { $first: "$taskDetails.description" },
+                            deadline: { $first: "$taskDetails.deadline" },
+                            clientEmail: { $first: "$client_email" },
+                            status: { $first: { $toLower: "$taskDetails.status" } },
+                            deliverableUrl: { $first: "$taskDetails.deliverable_url" },
+                            createdAt: { $first: "$taskDetails.createdAt" }
+                        }
+                    },
+
+                    { $sort: { "createdAt": -1 } },
                     {
                         $project: {
                             _id: 0,
-                            paymentId: "$_id",
-                            transactionId: "$transaction_id",
-                            amountPaid: "$amount",
-                            taskId: "$taskDetails._id",
-                            title: "$taskDetails.title",
-                            category: "$taskDetails.category",
-                            description: "$taskDetails.description",
-                            deadline: "$taskDetails.deadline",
-                            clientEmail: "$client_email",
-                            status: { $toLower: "$taskDetails.status" },
-                            deliverableUrl: "$taskDetails.deliverable_url"
+                            taskId: "$_id",
+                            paymentId: 1,
+                            transactionId: 1,
+                            amountPaid: 1,
+                            title: 1,
+                            category: 1,
+                            description: 1,
+                            deadline: 1,
+                            clientEmail: 1,
+                            status: 1,
+                            deliverableUrl: 1
                         }
                     }
                 ];
 
                 const activeProjects = await paymentsCollection.aggregate(finalPipeline).toArray();
-                console.log("🚀 BACKEND RESPONSE: Final processed matching rows returning to client:", activeProjects.length);
-                console.log("==========================================\n");
 
                 return res.status(200).json(activeProjects);
             } catch (error) {
-                console.error("❌ BACKEND ERROR EXCEPTION:", error);
                 return res.status(500).json({ message: "Failed to compile active project streams." });
             }
         });
         app.get('/freelancer-earnings', async (req, res) => {
-    try {
-        const { email } = req.query;
-
-        if (!email) {
-            return res.status(400).json({ message: "Missing 'email' query parameter." });
-        }
-
-        // 1. Fetch all successful payments for this freelancer
-        const payments = await paymentsCollection.find({ 
-            freelancer_email: email, 
-            payment_status: "paid" 
-        }).toArray();
-
-        // 2. Calculate operational metrics manually (super safe, no aggregation errors)
-        let totalEarned = 0;
-        const paymentCount = payments.length;
-
-        // Initialize empty monthly bins
-        const monthlyTotals = {
-            Jan: 0, Feb: 0, Mar: 0, Apr: 0, May: 0, Jun: 0,
-            Jul: 0, Aug: 0, Sep: 0, Oct: 0, Nov: 0, Dec: 0
-        };
-
-        // Create an array to hold history items with task details
-        const history = [];
-
-        for (const payment of payments) {
-            const amount = payment.amount || 0;
-            totalEarned += amount;
-
-            // Track monthly distribution based on paid_at date string or object
-            if (payment.paid_at) {
-                const dateObj = new Date(payment.paid_at);
-                const monthName = dateObj.toLocaleString('en-US', { month: 'short' }); // e.g., "Jun"
-                if (monthlyTotals[monthName] !== undefined) {
-                    monthlyTotals[monthName] += amount;
-                }
-            }
-
-            // Look up the matching task simply
-            let taskTitle = "Assignment Project";
             try {
-                if (payment.task_id) {
-                    const task = await tasksCollection.findOne({ _id: new ObjectId(payment.task_id.toString().trim()) });
-                    if (task) {
-                        taskTitle = task.title;
-                    }
+                const { email } = req.query;
+
+                if (!email) {
+                    return res.status(400).json({ message: "Missing 'email' query parameter." });
                 }
-            } catch (err) {
-                // If ObjectId conversion fails, keep default title and don't crash
-                console.error("Task look up skipped or failed for ID:", payment.task_id);
+
+                // 1. Fetch all successful payments for this freelancer
+                const payments = await paymentsCollection.find({
+                    freelancer_email: email,
+                    payment_status: "paid"
+                }).toArray();
+
+                // 2. Calculate operational metrics manually (super safe, no aggregation errors)
+                let totalEarned = 0;
+                const paymentCount = payments.length;
+
+                // Initialize empty monthly bins
+                const monthlyTotals = {
+                    Jan: 0, Feb: 0, Mar: 0, Apr: 0, May: 0, Jun: 0,
+                    Jul: 0, Aug: 0, Sep: 0, Oct: 0, Nov: 0, Dec: 0
+                };
+
+                // Create an array to hold history items with task details
+                const history = [];
+
+                for (const payment of payments) {
+                    const amount = payment.amount || 0;
+                    totalEarned += amount;
+
+                    // Track monthly distribution based on paid_at date string or object
+                    if (payment.paid_at) {
+                        const dateObj = new Date(payment.paid_at);
+                        const monthName = dateObj.toLocaleString('en-US', { month: 'short' }); // e.g., "Jun"
+                        if (monthlyTotals[monthName] !== undefined) {
+                            monthlyTotals[monthName] += amount;
+                        }
+                    }
+
+                    // Look up the matching task simply
+                    let taskTitle = "Assignment Project";
+                    try {
+                        if (payment.task_id) {
+                            const task = await tasksCollection.findOne({ _id: new ObjectId(payment.task_id.toString().trim()) });
+                            if (task) {
+                                taskTitle = task.title;
+                            }
+                        }
+                    } catch (err) {
+                        // If ObjectId conversion fails, keep default title and don't crash
+                        console.error("Task look up skipped or failed for ID:", payment.task_id);
+                    }
+
+                    // Format history item
+                    history.push({
+                        id: payment._id,
+                        taskTitle: taskTitle,
+                        clientEmail: payment.client_email || "client@gmail.com",
+                        amount: amount,
+                        date: payment.paid_at || new Date(),
+                        transactionId: payment.transaction_id || "N/A"
+                    });
+                }
+
+                const averagePerTask = paymentCount > 0 ? parseFloat((totalEarned / paymentCount).toFixed(2)) : 0;
+
+                // 3. Format monthly chart data array for frontend
+                const baseMonths = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+                const chartData = baseMonths.map(month => ({
+                    name: month,
+                    earnings: monthlyTotals[month]
+                }));
+
+                // Sort history by date descending (newest first)
+                history.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+                // Return final clean response object
+                return res.status(200).json({
+                    summary: {
+                        totalEarned,
+                        paymentCount,
+                        averagePerTask
+                    },
+                    chartData,
+                    history
+                });
+
+            } catch (error) {
+                console.error("Backend Error:", error);
+                return res.status(500).json({ message: "Failed to compile financial metrics." });
             }
-
-            // Format history item
-            history.push({
-                id: payment._id,
-                taskTitle: taskTitle,
-                clientEmail: payment.client_email || "client@gmail.com",
-                amount: amount,
-                date: payment.paid_at || new Date(),
-                transactionId: payment.transaction_id || "N/A"
-            });
-        }
-
-        const averagePerTask = paymentCount > 0 ? parseFloat((totalEarned / paymentCount).toFixed(2)) : 0;
-
-        // 3. Format monthly chart data array for frontend
-        const baseMonths = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-        const chartData = baseMonths.map(month => ({
-            name: month,
-            earnings: monthlyTotals[month]
-        }));
-
-        // Sort history by date descending (newest first)
-        history.sort((a, b) => new Date(b.date) - new Date(a.date));
-
-        // Return final clean response object
-        return res.status(200).json({
-            summary: {
-                totalEarned,
-                paymentCount,
-                averagePerTask
-            },
-            chartData,
-            history
         });
 
-    } catch (error) {
-        console.error("Backend Error:", error);
-        return res.status(500).json({ message: "Failed to compile financial metrics." });
-    }
-});
         /**
          * PATCH /tasks/:id/submit-deliverable
          * Submits assignment assets and changes job workflow state to completed
@@ -372,6 +357,43 @@ async function run() {
                 return res.status(500).json({ message: "Internal server error updating task status." });
             }
         });
+        // GET /task-details/:id
+        app.get('/task-details/:id', async (req, res) => {
+            try {
+                const { id } = req.params;
+
+                if (!id || id === 'undefined') {
+                    return res.status(400).json({ message: "Invalid or missing Task Identifier parameter." });
+                }
+
+                // Search using the database entry string conversion safely
+                const task = await tasksCollection.findOne({ _id: new ObjectId(id.toString().trim()) });
+
+                if (!task) {
+                    return res.status(404).json({ message: "The specified task profile could not be found." });
+                }
+
+                // Return all fields requested with fallback data types
+                return res.status(200).json({
+                    _id: task._id,
+                    title: task.title || "Untitled Assignment Task",
+                    category: task.category || "General Engineering",
+                    description: task.description || "No full summary description was attached to this project outline.",
+                    budget: task.budget || 0,
+                    deadline: task.deadline || "Open Window",
+                    client_email: task.client_email || "unknown-client@system.local",
+                    status: task.status || "completed",
+                    deliverable_url: task.deliverable_url || "",
+                    createdAt: task.createdAt || task.paid_at || new Date(),
+                    proposals: Array.isArray(task.proposals) ? task.proposals : []
+                });
+
+            } catch (error) {
+                console.error("❌ Task Audit API Fault:", error);
+                return res.status(500).json({ message: "Internal server error reading task details." });
+            }
+        });
+       
         /** 
          * 1. POST / tasks
             * Purpose: Publish a new job block into the database collection.
