@@ -7,6 +7,13 @@ dotenv.config();
 
 const app = express();
 const port = process.env.PORT || 8080;
+const RATING_VALUES = {
+    'Excellent': 5,
+    'Good': 4,
+    'Average': 3,
+    'Poor': 2,
+    'Very Poor': 1
+};
 
 app.use(cors());
 app.use(express.json());
@@ -527,6 +534,28 @@ async function run() {
                 });
             }
         });
+        // -------------------------------------------------------------------------
+        // 🚀 FETCH LATEST FEATURED OPEN TASKS FOR USER FEEDS
+        // -------------------------------------------------------------------------
+        app.get('/api/tasks/featured-open', async (req, res) => {
+            try {
+                // Query tasks that are open ("todo") sorted by newest creation date
+                const featuredTasks = await tasksCollection.find({
+                    status: { $regex: /^open$/i }
+                })
+                    .sort({ createdAt: -1 })
+                    .limit(6) // Limit to the top 6 most recent open postings
+                    .toArray();
+
+                return res.status(200).json({
+                    success: true,
+                    data: featuredTasks
+                });
+            } catch (error) {
+                console.error("❌ ==> [FETCH FEATURED TASKS EXCEPTION]:", error);
+                return res.status(500).json({ success: false, message: "Internal server error fetching featured listings." });
+            }
+        });
         app.post('/api/reviews', async (req, res) => {
             try {
                 const { taskId, reviewerEmail, revieweeEmail, rating, comment } = req.body;
@@ -614,6 +643,24 @@ async function run() {
             } catch (error) {
                 console.error("GET /api/reviews Error:", error);
                 return res.status(500).json({ message: "Internal server error retrieving review data." });
+            }
+        });
+        // New endpoint: Get all reviews for a specific freelancer by email
+        app.get('/api/freelancer-reviews', async (req, res) => {
+            try {
+                const { email } = req.query;
+
+                if (!email) {
+                    return res.status(400).json({ message: "Email query parameter is required." });
+                }
+
+                // Find all reviews where this freelancer was reviewed
+                const reviews = await reviewsCollection.find({ revieweeEmail: email }).toArray();
+
+                return res.status(200).json(reviews);
+            } catch (error) {
+                console.error("GET /api/freelancer-reviews Error:", error);
+                return res.status(500).json({ message: "Internal server error retrieving profile reviews." });
             }
         });
         /**
@@ -994,34 +1041,87 @@ async function run() {
             }
         });
         // GET /task-details/:id
+        // app.get('/task-details/:id', async (req, res) => {
+        //     try {
+        //         const { id } = req.params;
+
+        //         if (!id || id === 'undefined') {
+        //             return res.status(400).json({ message: "Invalid or missing Task Identifier parameter." });
+        //         }
+
+        //         // Search using the database entry string conversion safely
+        //         const task = await tasksCollection.findOne({ _id: new ObjectId(id.toString().trim()) });
+
+        //         if (!task) {
+        //             return res.status(404).json({ message: "The specified task profile could not be found." });
+        //         }
+
+        //         // Return all fields requested with fallback data types
+        //         return res.status(200).json({
+        //             _id: task._id,
+        //             title: task.title || "Untitled Assignment Task",
+        //             category: task.category || "General Engineering",
+        //             description: task.description || "No full summary description was attached to this project outline.",
+        //             budget: task.budget || 0,
+        //             deadline: task.deadline || "Open Window",
+        //             client_email: task.client_email || "unknown-client@system.local",
+        //             status: task.status || "completed",
+        //             deliverable_url: task.deliverable_url || "",
+        //             createdAt: task.createdAt || task.paid_at || new Date(),
+        //             proposals: Array.isArray(task.proposals) ? task.proposals : []
+        //         });
+
+        //     } catch (error) {
+        //         console.error("❌ Task Audit API Fault:", error);
+        //         return res.status(500).json({ message: "Internal server error reading task details." });
+        //     }
+        // });
         app.get('/task-details/:id', async (req, res) => {
             try {
                 const { id } = req.params;
 
-                if (!id || id === 'undefined') {
+                // 1. Safely normalize and check for empty/undefined values
+                const cleanId = id?.toString().trim();
+                if (!cleanId || cleanId === 'undefined' || cleanId === '') {
                     return res.status(400).json({ message: "Invalid or missing Task Identifier parameter." });
                 }
 
-                // Search using the database entry string conversion safely
-                const task = await tasksCollection.findOne({ _id: new ObjectId(id.toString().trim()) });
+                // 2. Validate MongoDB ObjectId format before database query
+                if (!ObjectId.isValid(cleanId)) {
+                    return res.status(400).json({ message: "The provided Task Identifier format is invalid." });
+                }
+
+                // 3. Fetch task from DB
+                const task = await tasksCollection.findOne({ _id: new ObjectId(cleanId) });
 
                 if (!task) {
                     return res.status(404).json({ message: "The specified task profile could not be found." });
                 }
 
-                // Return all fields requested with fallback data types
+                // 4. Fetch review associated with this task (using ObjectId matching)
+                const review = await reviewsCollection.findOne({
+                    $or: [
+                        { taskId: cleanId },                 // If it was saved as a String
+                        { taskId: new ObjectId(cleanId) }    // If it was saved as an ObjectId
+                    ]
+                });
+
+                // 5. Return sanitized payload with consistent fallback data types and the review
                 return res.status(200).json({
                     _id: task._id,
                     title: task.title || "Untitled Assignment Task",
                     category: task.category || "General Engineering",
-                    description: task.description || "No full summary description was attached to this project outline.",
-                    budget: task.budget || 0,
+                    description: task.description || "No full summary description was attached.",
+                    budget: Number(task.budget) || 0,
                     deadline: task.deadline || "Open Window",
-                    client_email: task.client_email || "unknown-client@system.local",
+                    client_email: task.client_email || "",
                     status: task.status || "completed",
                     deliverable_url: task.deliverable_url || "",
                     createdAt: task.createdAt || task.paid_at || new Date(),
-                    proposals: Array.isArray(task.proposals) ? task.proposals : []
+                    proposals: Array.isArray(task.proposals) ? task.proposals : [],
+
+                    // Sends the review object, or null if it hasn't been reviewed yet
+                    review: review || null
                 });
 
             } catch (error) {
@@ -1545,12 +1645,298 @@ async function run() {
         // -------------------------------------------------------------------------
         app.get('/all-proposals-summary', async (req, res) => {
             try {
-                const proposals = await proposalsCollection.find({}).toArray();
-                return res.status(200).json(proposals);
+                const proposalsWithStatus = await proposalsCollection.aggregate([
+                    {
+                        // 1. Join with the taskCollection
+                        $lookup: {
+                            from: "taskCollection",       // Make sure this matches your actual MongoDB collection name for tasks
+                            localField: "taskId",         // The field name inside proposalsCollection referencing the task
+                            foreignField: "_id",          // The identifier field name inside taskCollection (usually _id)
+                            as: "taskDetails"
+                        }
+                    },
+                    {
+                        // 2. Unwind the array generated by $lookup to make it an object
+                        $unwind: {
+                            path: "$taskDetails",
+                            preserveNullAndEmptyArrays: true // Keeps the proposal even if the task document is missing
+                        }
+                    },
+                    {
+                        // 3. Project the fields so the frontend gets exactly what it expects
+                        $project: {
+                            _id: 1,
+                            freelancer_email: 1,
+                            // If the task exists, grab its status; otherwise default to "pending"
+                            status: { $ifNull: ["$taskDetails.status", "pending"] },
+                            // Include any other proposal fields you need here:
+                            title: 1,
+                            bidAmount: 1
+                        }
+                    }
+                ]).toArray();
+
+                return res.status(200).json(proposalsWithStatus);
             } catch (error) {
+                console.error("Aggregation Error:", error);
                 return res.status(500).json({ message: "Internal server error." });
             }
         });
+        // GET: Calculate and rank the Top 3 Freelancers based on ratings
+        app.get("/api/top-freelancers", async (req, res) => {
+            try {
+                // 1. Grab all freelancer records
+                // Assumes your freelancers are stored in a accessible endpoint array or MongoDB collection
+                // Replace with database query if using native drivers (e.g., await Freelancer.find({}))
+                const freelancersResponse = await fetch("http://localhost:8080/freelancers");
+                if (!freelancersResponse.ok) {
+                    return res.status(500).json({ error: "Failed to collect core freelancer profiles registry." });
+                }
+                const freelancers = await freelancersResponse.json();
+
+                // 2. Fetch all evaluation reviews
+                // Assumes your global reviews collection exists on this endpoint structure
+                const reviewsResponse = await fetch("http://localhost:8080/api/reviews");
+                let allReviews = [];
+                if (reviewsResponse.ok) {
+                    allReviews = await reviewsResponse.json();
+                }
+
+                // Map over each freelancer to aggregate values
+                const rankedFreelancers = freelancers.map(user => {
+                    const userEmail = user.email?.trim().toLowerCase();
+
+                    // Filter reviews matching the exact target profile's email address
+                    const matchingReviews = allReviews.filter(review =>
+                        review.revieweeEmail?.trim().toLowerCase() === userEmail
+                    );
+
+                    // Compute total jobs completed (count of review ledgers linked)
+                    const totalJobsDone = matchingReviews.length;
+
+                    // Calculate exact average star metric rating matrix
+                    let averageRating = 0;
+                    if (totalJobsDone > 0) {
+                        // If rating is passed down as a quantitative string ("Excellent", "Good"), map it or reduce numbers
+                        const sum = matchingReviews.reduce((acc, curr) => {
+                            let numericalValue = 5; // Default fallback score
+
+                            if (typeof curr.rating === 'number') {
+                                numericalValue = curr.rating;
+                            } else if (typeof curr.rating === 'string') {
+                                const score = curr.rating.trim().toLowerCase();
+                                if (score === 'excellent') numericalValue = 5;
+                                else if (score === 'good') numericalValue = 4;
+                                else if (score === 'average' || score === 'fair') numericalValue = 3;
+                                else if (score === 'poor') numericalValue = 2;
+                            }
+                            return acc + numericalValue;
+                        }, 0);
+
+                        averageRating = sum / totalJobsDone;
+                    }
+
+                    return {
+                        ...user,
+                        totalJobsDone,
+                        averageRating
+                    };
+                });
+
+                // 3. Sort freelancers by performance rating descending, then select top 3
+                const topThree = rankedFreelancers
+                    .sort((a, b) => b.averageRating - a.averageRating)
+                    .slice(0, 3);
+
+                res.json(topThree);
+
+            } catch (error) {
+                console.error("Backend TopFreelancers aggregation failed:", error);
+                res.status(500).json({ error: "Internal processing error collecting talent rankings." });
+            }
+        });
+        app.get("/api/top-freelancers", async (req, res) => {
+            console.log("\n🚀 [BACKEND DIAGNOSTIC] Incoming request to compile Top Rated Freelancers...");
+
+            try {
+                // 1. Fetch all basic freelancer accounts
+                const freelancersResponse = await fetch("http://localhost:8080/freelancers");
+                if (!freelancersResponse.ok) {
+                    console.error("❌ [BACKEND DIAGNOSTIC] Failed fetching basic user node list.");
+                    return res.status(500).json({ error: "Failed to collect core freelancer profiles registry." });
+                }
+                const freelancers = await freelancersResponse.json();
+                console.log(`📦 [BACKEND DIAGNOSTIC] Loaded ${freelancers.length} freelancers from the database.`);
+
+                // 2. Concurrently fetch and resolve matching profile reviews for each freelancer
+                const computedFreelancers = await Promise.all(
+                    freelancers.map(async (freelancer) => {
+                        let matchingReviews = [];
+                        const targetEmail = freelancer.email?.trim().toLowerCase();
+
+                        try {
+                            // Pull specific reviews filtered by the freelancer's email address
+                            const reviewResponse = await fetch(`http://localhost:8080/api/freelancer-reviews?email=${encodeURIComponent(freelancer.email)}`);
+                            if (reviewResponse.ok) {
+                                matchingReviews = await reviewResponse.json();
+                            }
+                        } catch (err) {
+                            console.warn(`⚠️ [BACKEND DIAGNOSTIC] Problem querying review maps for ${freelancer.email}:`, err.message);
+                        }
+
+                        // Apply text-to-score calculation rating matrix logic 
+                        let averageScore = 0;
+                        if (matchingReviews && matchingReviews.length > 0) {
+                            const totalScore = matchingReviews.reduce((sum, rev) => {
+                                const score = RATING_VALUES[rev.rating] || 0;
+                                return sum + score;
+                            }, 0);
+
+                            // Round off to one decimal point precision
+                            averageScore = parseFloat((totalScore / matchingReviews.length).toFixed(1));
+                        }
+
+                        console.log(`📊 [BACKEND DIAGNOSTIC] Freelancer: ${freelancer.name} (${freelancer.email}) | Reviews Count: ${matchingReviews.length} | Computed AvgRating: ${averageScore}`);
+
+                        return {
+                            ...freelancer,
+                            avgRating: averageScore
+                        };
+                    })
+                );
+
+                // 3. Sort freelancers descending based on their computed average ratings
+                const topThree = computedFreelancers
+                    .sort((a, b) => b.avgRating - a.avgRating)
+                    .slice(0, 3);
+
+                console.log("🏆 [BACKEND DIAGNOSTIC] Successfully ranked and calculated Top 3 records:",
+                    topThree.map(f => ({ name: f.name, avgRating: f.avgRating }))
+                );
+
+                // Return calculated top freelancers matrix collection payload
+                res.json(topThree);
+
+            } catch (error) {
+                console.error("❌ [BACKEND DIAGNOSTIC] Global fatal process exception:", error);
+                res.status(500).json({ error: "Internal processing error collecting talent rankings." });
+            }
+        });
+        /**
+         * GET: Aggregate platform statistics totals
+         * Pulls collections arrays and reduces total balances dynamically.
+         */
+        // GET /api/platform-stats
+        app.get('/api/platform-stats', async (req, res) => {
+            try {
+                const db = client.db('skillswap');
+
+                const usersCollection = db.collection('user');
+                const tasksCollection = db.collection('tasks');
+                const paymentsCollection = db.collection('payments');
+
+                // Total Users
+                const totalUsers = await usersCollection.countDocuments();
+
+                // Total Completed Jobs
+                const totalJobsDone = await tasksCollection.countDocuments({
+                    status: "Completed"
+                });
+
+                // Total Payout Completed (sum of all paid amounts)
+                const paymentResult = await paymentsCollection.aggregate([
+                    {
+                        $match: {
+                            payment_status: "paid"
+                        }
+                    },
+                    {
+                        $group: {
+                            _id: null,
+                            totalPaymentSum: {
+                                $sum: "$amount"
+                            }
+                        }
+                    }
+                ]).toArray();
+
+                const totalPaymentSum =
+                    paymentResult.length > 0
+                        ? paymentResult[0].totalPaymentSum
+                        : 0;
+
+                res.status(200).json({
+                    success: true,
+                    data: {
+                        totalUsers,
+                        totalJobsDone,
+                        totalPaymentSum
+                    }
+                });
+
+            } catch (error) {
+                console.error("Platform Stats Error:", error);
+                res.status(500).json({
+                    success: false,
+                    message: "Failed to fetch platform statistics."
+                });
+            }
+        });
+        // PATCH /api/tasks/:id/complete
+        // PATCH: http://localhost:8080/api/tasks/:id/complete
+        /**
+         * PATCH: Transition status field from 'in_progress' to 'Completed'
+         * Ensures task is verified, open to edits, and owned by the requesting client.
+         */
+       // Ensure your Task model is imported at the top of your backend file
+// const Task = require("../models/Task"); 
+
+app.patch("/api/tasks/:id/complete", async (req, res) => {
+    const { id } = req.params;
+    const { email } = req.body; 
+
+    console.log(`\n🏁 [BACKEND DIAGNOSTIC] Request to close task ID: ${id} by Client: ${email}`);
+
+    try {
+        // 1. Convert the string ID to a MongoDB ObjectId safely
+        if (!ObjectId.isValid(id)) {
+            return res.status(400).json({ error: "Invalid task ID format." });
+        }
+        const query = { _id: new ObjectId(id) };
+
+        // 2. Fetch task directly from your MongoDB collection
+        // Replace 'db' with whatever your database variable name is (e.g., req.app.locals.db)
+        const tasksCollection = db.collection('tasks'); 
+        const task = await tasksCollection.findOne(query);
+
+        if (!task) {
+            return res.status(404).json({ error: "Target task document not found." });
+        }
+
+        // 3. Validate current operational status parameters
+        if (task.status?.toLowerCase() !== 'in_progress') {
+            return res.status(400).json({ error: "Invalid Action: Only tasks currently 'in_progress' can be marked as complete." });
+        }
+
+        // 4. Security Check
+        const ownerEmail = task.client_email;
+        if (!ownerEmail || ownerEmail.trim().toLowerCase() !== email?.trim().toLowerCase()) {
+            return res.status(403).json({ error: "Access Denied: You do not have permission to modify this project listing." });
+        }
+
+        // 5. Update the status field directly in the collection
+        await tasksCollection.updateOne(query, {
+            $set: { status: "Completed" }
+        });
+
+        console.log(`🎯 [STATUS SYNCHRONIZED] Task ${id} updated to 'Completed' in MongoDB collection.`);
+        return res.json({ message: "Task finalized successfully.", status: "Completed" });
+
+    } catch (error) {
+        console.error("❌ [BACKEND DIAGNOSTIC] Problem executing complete action status changes:", error.message);
+        return res.status(500).json({ error: "Internal server error processing transaction lifecycle." });
+    }
+});
 
     } catch (error) {
         console.error("Initialization Error:", error);
