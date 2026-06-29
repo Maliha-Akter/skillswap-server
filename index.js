@@ -1,11 +1,9 @@
 const express = require('express');
 const dotenv = require('dotenv');
 const cors = require('cors');
-// ✅ FIX: Combined both imports into a single clean line to prevent Syntax/Redeclaration crashes
 const { MongoClient, ServerApiVersion, ObjectId } = require('mongodb');
 const { createRemoteJWKSet, jwtVerify } = require('jose-cjs');
 dotenv.config();
-
 const app = express();
 const port = process.env.PORT || 8080;
 const RATING_VALUES = {
@@ -52,7 +50,7 @@ const verifyToken = async (req, res, next) => {
 async function run() {
     try {
         // 1. Establishing database connection safely
-        await client.connect();
+        // await client.connect();
 
         // 2. Selecting database and establish collection references
         const db = client.db('skillswap');
@@ -62,12 +60,12 @@ async function run() {
         const reviewsCollection = db.collection('reviews');
         const usersCollection = db.collection('user');
 
-        await client.db("admin").command({ ping: 1 });
+        // await client.db("admin").command({ ping: 1 });
         console.log("Pinged your deployment. You successfully connected to MongoDB!");
 
 
         // -------------------------------------------------------------------------
-        // 🛡️ ADMIN ACCESS CONTROL MIDDLEWARE
+        // ADMIN PART
         // -------------------------------------------------------------------------
         const authAdmin = async (req, res, next) => {
             try {
@@ -78,20 +76,17 @@ async function run() {
                     return res.status(401).json({ message: "Unauthorized: Missing identity header." });
                 }
 
-                // 1. Parse admin emails array from your environment variables configuration
                 const envAdminEmails = process.env.ADMIN_EMAILS
                     ? process.env.ADMIN_EMAILS.split(',').map(email => email.trim().toLowerCase())
                     : [];
 
                 const incomingEmailLower = userEmail.toLowerCase();
 
-                // 2. STAGE A Validation: Instant match if found in our safe env list
                 if (envAdminEmails.includes(incomingEmailLower)) {
                     console.log(`==> [BACKEND AUTH] Authorized master access via environment mapping rule for: ${userEmail}`);
                     return next();
                 }
 
-                // 3. STAGE B Validation: Standard fallback collection lookup matching your "user" table
                 const user = await usersCollection.findOne({ email: userEmail });
                 console.log("==> [BACKEND AUTH] Database user lookup record resolved:", user);
 
@@ -108,56 +103,51 @@ async function run() {
             }
         };
 
-        // -------------------------------------------------------------------------
-        // 👥 ADMIN: FETCH & FILTER USERS ENDPOINT
-        // -------------------------------------------------------------------------
         app.get('/api/admin/users', verifyToken, authAdmin, async (req, res) => {
-    try {
-        console.log("==> [TRACE 5: ROUTE REACHED] Request bypassed both middlewares safely!");
-        
-        const { search, role } = req.query;
-        console.log(`==> [TRACE 6: ROUTE PARAMS] Search Query: "${search || ''}", Filtered Role: "${role || ''}"`);
+            try {
+                console.log("==> [TRACE 5: ROUTE REACHED] Request bypassed both middlewares safely!");
 
-        let query = {};
+                const { search, role } = req.query;
+                console.log(`==> [TRACE 6: ROUTE PARAMS] Search Query: "${search || ''}", Filtered Role: "${role || ''}"`);
 
-        if (search) {
-            query.$or = [
-                { name: { $regex: search, $options: 'i' } },
-                { email: { $regex: search, $options: 'i' } }
-            ];
-        }
+                let query = {};
 
-        if (role && role !== 'all') {
-            query.role = { $regex: `^${role}$`, $options: 'i' };
-        }
+                if (search) {
+                    query.$or = [
+                        { name: { $regex: search, $options: 'i' } },
+                        { email: { $regex: search, $options: 'i' } }
+                    ];
+                }
 
-        console.log("==> [TRACE 7: MONGO EXECUTION] Query Filter Object:", JSON.stringify(query));
-        console.log("==> [TRACE 7a: TARGET COLLECTION REFERENCE]:", usersCollection.collectionName);
+                if (role && role !== 'all') {
+                    query.role = { $regex: `^${role}$`, $options: 'i' };
+                }
 
-        const users = await usersCollection
-            .find(query)
-            .sort({ createdAt: -1 })
-            .toArray();
+                console.log("==> [TRACE 7: MONGO EXECUTION] Query Filter Object:", JSON.stringify(query));
+                console.log("==> [TRACE 7a: TARGET COLLECTION REFERENCE]:", usersCollection.collectionName);
 
-        console.log(`==> [TRACE 8: MONGO RESOLVED] Query completed. Record count found: ${users.length}`);
+                const users = await usersCollection
+                    .find(query)
+                    .sort({ createdAt: -1 })
+                    .toArray();
 
-        return res.status(200).json({
-            success: true,
-            data: users
+                console.log(`==> [TRACE 8: MONGO RESOLVED] Query completed. Record count found: ${users.length}`);
+
+                return res.status(200).json({
+                    success: true,
+                    data: users
+                });
+            } catch (error) {
+                console.error("==> [TRACE ERROR: ROUTE CRASHED] GET /api/admin/users:", error);
+                return res.status(500).json({
+                    success: false,
+                    message: "Failed to load platform accounts collection.",
+                    error: error.message
+                });
+            }
         });
-    } catch (error) {
-        console.error("==> [TRACE ERROR: ROUTE CRASHED] GET /api/admin/users:", error);
-        return res.status(500).json({
-            success: false,
-            message: "Failed to load platform accounts collection.",
-            error: error.message
-        });
-    }
-});
-        // -------------------------------------------------------------------------
-        // 🚫 ADMIN: TOGGLE USER BLOCK/UNBLOCK PERMISSIONS STATUS
-        // -------------------------------------------------------------------------
-        app.patch('/api/admin/users/:id/block',verifyToken, authAdmin, async (req, res) => {
+
+        app.patch('/api/admin/users/:id/block', verifyToken, authAdmin, async (req, res) => {
             try {
                 const { id } = req.params;
                 const { isBlocked } = req.body;
@@ -195,8 +185,7 @@ async function run() {
             }
         });
 
-        // 🟢 GET ALL TASKS PIPELINE (WITH FILTERING & ADMINISTRATIVE AUDITING)
-        app.get("/api/admin/tasks", verifyToken ,authAdmin, async (req, res) => {
+        app.get("/api/admin/tasks", verifyToken, authAdmin, async (req, res) => {
             try {
                 const { search, categories, status, minBudget, maxBudget } = req.query;
 
@@ -206,12 +195,9 @@ async function run() {
 
                 let query = {};
 
-                // 1. Debounced Text Title Search
                 if (search) {
                     query.title = { $regex: search, $options: "i" };
                 }
-
-                // 2. Categories Multi-Select Checkboxes
                 if (categories) {
                     const categoryList = categories.split(",");
                     if (categoryList.length > 0 && categoryList[0] !== "") {
@@ -219,12 +205,10 @@ async function run() {
                     }
                 }
 
-                // 3. Live Status Tracks (Open, in_progress, Completed)
                 if (status && status.toLowerCase() !== "all") {
                     query.status = { $regex: new RegExp(`^${status}$`, "i") };
                 }
 
-                // 4. Budget Range Tiers & Custom Bounds
                 if (minBudget || maxBudget) {
                     query.budget = {};
                     if (minBudget) query.budget.$gte = parseFloat(minBudget);
@@ -249,13 +233,10 @@ async function run() {
             }
         });
 
-        // 🔴 DELETE TASK ITEM ROW (SAFETY GUIDELINES / VIOLATIONS TERMINATION)
-        // ✅ Added authAdmin protection here too so standard users can't delete items using tools like Postman!
-        app.delete("/api/admin/tasks/:id", verifyToken ,authAdmin, async (req, res) => {
+        app.delete("/api/admin/tasks/:id", verifyToken, authAdmin, async (req, res) => {
             try {
                 const { id } = req.params;
 
-                // Uses the top-level inherited or safely imported ObjectId reference
                 const result = await tasksCollection.deleteOne({ _id: new ObjectId(id) });
 
                 if (result.deletedCount === 1) {
@@ -271,14 +252,11 @@ async function run() {
             }
         });
 
-        // -------------------------------------------------------------------------
-        // 📊 ADMINISTRATIVE AGGREGATED METRICS & OVERVIEW ENDPOINT
-        // -------------------------------------------------------------------------
         app.get('/api/admin/overview-stats', verifyToken, authAdmin, async (req, res) => {
             try {
                 console.log("==> [BACKEND OVERVIEW] Aggregating multi-collection dataset streams...");
 
-                // 1. Fetch Fundamental Counts and Totals
+                // 1. Fetching  Counts and Totals
                 const totalUsers = await usersCollection.countDocuments({});
                 const totalTasks = await tasksCollection.countDocuments({});
                 const activeTasks = await tasksCollection.countDocuments({ status: "in_progress" });
@@ -287,42 +265,39 @@ async function run() {
                 const blockedUsers = await usersCollection.countDocuments({ isBlocked: true });
                 const successfulPayments = await paymentsCollection.countDocuments({ payment_status: "paid" });
 
-                // 2. Compute Total Financial Revenue
+                // 2. Computing Total Financial Revenue
                 const revenueAggregation = await paymentsCollection.aggregate([
                     { $match: { payment_status: "paid" } },
                     { $group: { _id: null, total: { $sum: "$amount" } } }
                 ]).toArray();
                 const totalRevenue = revenueAggregation[0]?.total || 0;
 
-                // 3. Build Task Distribution Status Chart
+                // 3. Building Task Distribution Status Chart
                 const todoCount = await tasksCollection.countDocuments({ status: "todo" });
                 const inProgressCount = await tasksCollection.countDocuments({ status: "in_progress" });
                 const doneCount = await tasksCollection.countDocuments({ status: "completed" });
 
-                // 4. Generate Last 6 Months/Days Revenue Points Timeline
-                // If data is scarce, it falls back gracefully to standard increments mapped over your layout
+                // 4. Generating Last 6 Months/Days Revenue Points Timeline
                 const recentPaymentsList = await paymentsCollection.find({ payment_status: "paid" })
                     .sort({ paid_at: -1 })
                     .limit(6)
                     .toArray();
 
-                // Map live transaction nodes into simplified date values for the UI chart bars
                 const revenueChart = recentPaymentsList.map(pay => ({
                     date: pay.paid_at ? new Date(pay.paid_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' }) : 'Recent',
                     amount: pay.amount || 0
                 })).reverse();
 
-                // If revenue streams are empty, inject baseline historical milestones automatically
                 if (revenueChart.length === 0) {
                     revenueChart.push({ date: 'Base', amount: 0 });
                 }
 
-                // 5. Fetch Recent Activity Feed Document Lists
+                // 5. Fetching Recent Activity Feed Document Lists
                 const recentTasks = await tasksCollection.find({}).sort({ _id: -1 }).limit(5).toArray();
                 const recentUsers = await usersCollection.find({}).sort({ _id: -1 }).limit(5).toArray();
                 const recentPayments = await paymentsCollection.find({}).sort({ paid_at: -1 }).limit(5).toArray();
 
-                // 6. Return standard structured response object wrapper
+                // 6. Returning standard structured response object wrapper
                 return res.status(200).json({
                     success: true,
                     data: {
@@ -358,10 +333,7 @@ async function run() {
         });
 
         // -------------------------------------------------------------------------
-        // 🛠️ FREELANCER AGGREGATED WORKSPACE STATISTICS & OVERVIEW PIPELINE
-        // -------------------------------------------------------------------------
-        // -------------------------------------------------------------------------
-        // 🛠️ CORRECTED FREELANCER AGGREGATED WORKSPACE STATISTICS PIPELINE
+        // FREELANCER PART
         // -------------------------------------------------------------------------
         app.get('/api/freelancer/overview-stats', async (req, res) => {
             try {
@@ -372,8 +344,6 @@ async function run() {
 
                 console.log(`==> [FREELANCER OVERVIEW] Syncing dataset for: ${freelancerEmail}`);
 
-                // 1. Get proposal statuses directly from the proposals collection (using your exact schema variables)
-                // Note: Your schema snippet shows status "rejected" (lowercase). We will support both exact match and lowercase.
                 const totalProposals = await proposalsCollection.countDocuments({ freelancer_email: freelancerEmail });
 
                 const pendingProposals = await proposalsCollection.countDocuments({
@@ -391,22 +361,18 @@ async function run() {
                     status: { $regex: /^rejected$/i }
                 });
 
-                // 2. Find all tasks that this freelancer had an accepted proposal for
                 const acceptedBids = await proposalsCollection.find({
                     freelancer_email: freelancerEmail,
                     status: { $regex: /^accepted$/i }
                 }).toArray();
 
-                // Extract the task IDs that belong to this freelancer
                 const freelancerTaskIds = acceptedBids.map(bid => bid.task_id);
 
-                // 3. Calculate Total Earnings from the tasks table where the task is Completed
-                // FIXED: Using your exact capitalized status: "Completed"
                 const completedTasksAggregation = await tasksCollection.aggregate([
                     {
                         $match: {
                             _id: { $in: freelancerTaskIds },
-                            status: "Completed" // 💎 EXACT CAPITALIZATION MATCH FROM YOUR DB
+                            status: "Completed" 
                         }
                     },
                     { $group: { _id: null, total: { $sum: "$budget" } } }
@@ -414,12 +380,11 @@ async function run() {
 
                 const totalEarnings = completedTasksAggregation[0]?.total || 0;
 
-                // 4. Build Earnings History Stream using completed tasks
                 const completedTasksList = await tasksCollection.find({
                     _id: { $in: freelancerTaskIds },
                     status: "Completed"
                 })
-                    .sort({ completedAt: -1 }) // Sorting by your schema's completedAt timestamp
+                    .sort({ completedAt: -1 }) 
                     .limit(6)
                     .toArray();
 
@@ -432,35 +397,30 @@ async function run() {
                     earningsChart.push({ date: 'Initiated', amount: 0 });
                 }
 
-                // 5. Fetch Horizontal Row Feeds for the UI
-                // Row Feed A: Recent Proposals submitted by this freelancer
                 const recentProposalsRaw = await proposalsCollection.find({ freelancer_email: freelancerEmail })
-                    .sort({ submitted_at: -1 }) // Uses your schema's submitted_at property
+                    .sort({ submitted_at: -1 }) 
                     .limit(5)
                     .toArray();
 
-                // Map proposals and join task titles so your frontend has a project title to show
                 const recentProposals = await Promise.all(recentProposalsRaw.map(async (prop) => {
                     const taskInfo = await tasksCollection.findOne({ _id: prop.task_id });
                     return {
                         _id: prop._id,
                         taskTitle: taskInfo ? taskInfo.title : "Unknown Assignment Brief",
-                        bidAmount: prop.proposed_budget, // Uses your schema's proposed_budget variable
-                        coverLetter: prop.cover_note,     // Uses your schema's cover_note variable
+                        bidAmount: prop.proposed_budget, 
+                        coverLetter: prop.cover_note,     
                         status: prop.status
                     };
                 }));
 
-                // Row Feed B: Active Ongoing Contracts (Tasks that are accepted but not completed yet)
                 const activeContracts = await tasksCollection.find({
                     _id: { $in: freelancerTaskIds },
-                    status: { $ne: "Completed" } // Anything not completed yet is considered processing
+                    status: { $ne: "Completed" }  
                 })
                     .sort({ createdAt: -1 })
                     .limit(5)
                     .toArray();
 
-                // 6. Return the safe response package payload
                 return res.status(200).json({
                     success: true,
                     data: {
@@ -494,7 +454,6 @@ async function run() {
         // -------------------------------------------------------------------------
         app.get('/api/client/overview-stats', verifyToken, async (req, res) => {
             try {
-                // const clientEmail = req.headers['user-email'];
                 const clientEmail = req.user.email;
                 if (!clientEmail) {
                     return res.status(400).json({ success: false, message: "Identification header missing." });
@@ -502,27 +461,23 @@ async function run() {
 
                 console.log(`==> [CLIENT OVERVIEW] Syncing dataset for: ${clientEmail}`);
 
-                // 1. Core Task Counts matching your specific layout requirements
                 const totalTasks = await tasksCollection.countDocuments({ client_email: clientEmail });
 
-                // Open Tasks = Tasks that are still in "todo" or looking for bids
                 const openTasks = await tasksCollection.countDocuments({
                     client_email: clientEmail,
                     status: { $regex: /^open$/i }
                 });
 
-                // Tasks In Progress = Active contracts currently being built
                 const tasksInProgress = await tasksCollection.countDocuments({
                     client_email: clientEmail,
                     status: { $regex: /^in_progress$/i }
                 });
 
-                // 2. Total Spent = Sum of budgets from tasks that are officially finished
                 const completedExpenditure = await tasksCollection.aggregate([
                     {
                         $match: {
                             client_email: clientEmail,
-                            status: "Completed" // Exact capitalization match from your database schema
+                            status: "Completed"
                         }
                     },
                     { $group: { _id: null, total: { $sum: "$budget" } } }
@@ -530,13 +485,11 @@ async function run() {
 
                 const totalSpent = completedExpenditure[0]?.total || 0;
 
-                // 3. Optional: Extra telemetry structures to keep layout uniform with your feeds
                 const recentTasks = await tasksCollection.find({ client_email: clientEmail })
                     .sort({ createdAt: -1 })
                     .limit(5)
                     .toArray();
 
-                // 4. Safely package and dispatch the data matrix response
                 return res.status(200).json({
                     success: true,
                     data: {
@@ -558,17 +511,14 @@ async function run() {
                 });
             }
         });
-        // -------------------------------------------------------------------------
-        // 🚀 FETCH LATEST FEATURED OPEN TASKS FOR USER FEEDS
-        // -------------------------------------------------------------------------
+
         app.get('/api/tasks/featured-open', async (req, res) => {
             try {
-                // Query tasks that are open ("todo") sorted by newest creation date
                 const featuredTasks = await tasksCollection.find({
                     status: { $regex: /^open$/i }
                 })
                     .sort({ createdAt: -1 })
-                    .limit(6) // Limit to the top 6 most recent open postings
+                    .limit(6)
                     .toArray();
 
                 return res.status(200).json({
@@ -580,11 +530,11 @@ async function run() {
                 return res.status(500).json({ success: false, message: "Internal server error fetching featured listings." });
             }
         });
+
         app.post('/api/reviews', verifyToken, async (req, res) => {
             try {
                 const { taskId, reviewerEmail, revieweeEmail, rating, comment } = req.body;
 
-                // Validate payload fields
                 if (!taskId || !reviewerEmail || !revieweeEmail || !rating || !comment) {
                     return res.status(400).json({ message: "All fields are required." });
                 }
@@ -595,18 +545,16 @@ async function run() {
 
                 const taskOId = new ObjectId(taskId);
 
-                // Prevent duplicate reviews for the same task
                 const existingReview = await reviewsCollection.findOne({ taskId: taskOId });
                 if (existingReview) {
                     return res.status(400).json({ message: "This task has already been reviewed." });
                 }
 
-                // Construct clean data document
                 const reviewRecord = {
                     taskId: taskOId,
                     reviewerEmail,
                     revieweeEmail,
-                    rating, // Expecting: 'Very Poor', 'Poor', 'Average', 'Good', or 'Excellent'
+                    rating,
                     comment,
                     createdAt: new Date()
                 };
@@ -623,6 +571,7 @@ async function run() {
                 return res.status(500).json({ message: "Internal server error saving feedback entry." });
             }
         });
+
         app.get('/api/reviews', verifyToken, async (req, res) => {
             try {
                 const { taskId } = req.query;
@@ -637,10 +586,8 @@ async function run() {
 
                 const taskOId = new ObjectId(taskId);
 
-                // 1. Find the existing review if it exists
                 const review = await reviewsCollection.findOne({ taskId: taskOId });
 
-                // 2. Query proposal checking BOTH ObjectId and String formats to prevent silent mismatches
                 const acceptedProposal = await proposalsCollection.findOne({
                     $or: [
                         { task_id: taskOId },
@@ -649,12 +596,10 @@ async function run() {
                     status: { $in: ['accepted', 'approved', 'Accepted', 'Approved'] }
                 });
 
-                // Debugging logs — check your terminal/console when this endpoint runs!
                 console.log("=== Debugging Review Pipeline ===");
                 console.log("Target Task ID:", taskId);
                 console.log("Found Proposal Document:", acceptedProposal);
 
-                // Fallback checks just in case field names are snake_case vs camelCase
                 const freelancerEmail = acceptedProposal
                     ? (acceptedProposal.freelancer_email || acceptedProposal.freelancerEmail)
                     : null;
@@ -669,7 +614,7 @@ async function run() {
                 return res.status(500).json({ message: "Internal server error retrieving review data." });
             }
         });
-        // New endpoint: Get all reviews for a specific freelancer by email
+
         app.get('/api/freelancer-reviews', async (req, res) => {
             try {
                 const { email } = req.query;
@@ -678,7 +623,6 @@ async function run() {
                     return res.status(400).json({ message: "Email query parameter is required." });
                 }
 
-                // Find all reviews where this freelancer was reviewed
                 const reviews = await reviewsCollection.find({ revieweeEmail: email }).toArray();
 
                 return res.status(200).json(reviews);
@@ -687,10 +631,7 @@ async function run() {
                 return res.status(500).json({ message: "Internal server error retrieving profile reviews." });
             }
         });
-        /**
-         * NEW ENDPOINT: GET /tasks/:id/proposals
-         * Purpose: Fetch all active proposals linked to a target task.
-         */
+        
         app.get('/tasks/:id/proposals', verifyToken, async (req, res) => {
             try {
                 const taskId = req.params.id;
@@ -701,12 +642,11 @@ async function run() {
 
                 const taskOId = new ObjectId(taskId);
 
-                // Based on your post route, your field name is explicitly 'task_id' as an ObjectId
                 const query = { task_id: taskOId };
 
                 const proposals = await proposalsCollection
                     .find(query)
-                    .sort({ submitted_at: -1 }) // ✨ FIXED: Changed from createdAt to submitted_at
+                    .sort({ submitted_at: -1 }) 
                     .toArray();
 
                 return res.status(200).json({
@@ -719,22 +659,17 @@ async function run() {
                 return res.status(500).json({ message: "Internal server error fetching pipeline proposals." });
             }
         });
-        // -------------------------------------------------------------------------
-        // 💳 ADMIN TRANSACTIONS HISTORY API ENDPOINT
-        // -------------------------------------------------------------------------
-        app.get('/payments', verifyToken ,authAdmin, async (req, res) => {
+    
+        app.get('/payments', verifyToken, authAdmin, async (req, res) => {
             try {
                 console.log("==> [BACKEND] Fetching absolute Stripe payment ledger items...");
-
-                // Querying payments collection and sort by most recent transaction
                 const payments = await paymentsCollection
                     .find({})
-                    .sort({ paid_at: -1 }) // Sort from newest to oldest
+                    .sort({ paid_at: -1 }) 
                     .toArray();
 
                 console.log(`==> [BACKEND SUCCESS] Transmitted ${payments.length} transaction records.`);
 
-                // Return matching data layout structured for array validation check on frontend
                 return res.status(200).json(payments);
             } catch (error) {
                 console.error("❌ ==> [BACKEND TRANSACTIONS ERROR]:", error);
@@ -744,14 +679,7 @@ async function run() {
                 });
             }
         });
-        /**
-         * NEW ENDPOINT: POST /payments
-         * Purpose: Process successful payments and cascade status changes.
-         * 1. Inserts payment row into 'payments' collection
-         * 2. Updates the chosen freelancer's proposal status to 'accepted'
-         * 3. Rejects all other proposals for this specific task
-         * 4. Updates the task status to 'in_progress'
-         */
+        
         app.post('/payments', async (req, res) => {
             try {
                 const {
@@ -838,8 +766,6 @@ async function run() {
                 if (!email) {
                     return res.status(400).json({ message: "Missing 'email' query parameter." });
                 }
-
-                // 3. Define pipeline execution
                 const pipeline = [
                     {
                         $match: {
@@ -870,7 +796,6 @@ async function run() {
 
                 const testAggregation = await paymentsCollection.aggregate(pipeline).toArray();
 
-                // Final safe aggregation pipeline for output production
                 const finalPipeline = [
                     { $match: { freelancer_email: email, payment_status: "paid" } },
                     {
@@ -888,7 +813,6 @@ async function run() {
                     { $match: { "taskDetails.0": { $exists: true } } },
                     { $unwind: "$taskDetails" },
 
-                    // 🛠️ FIX: Combine rows sharing the exact same task ID to completely prevent duplicates
                     {
                         $group: {
                             _id: "$taskDetails._id",
@@ -940,30 +864,25 @@ async function run() {
                     return res.status(400).json({ message: "Missing 'email' query parameter." });
                 }
 
-                // 1. Fetch all successful payments for this freelancer
                 const payments = await paymentsCollection.find({
                     freelancer_email: email,
                     payment_status: "paid"
                 }).toArray();
 
-                // 2. Calculate operational metrics manually (super safe, no aggregation errors)
                 let totalEarned = 0;
                 const paymentCount = payments.length;
 
-                // Initialize empty monthly bins
                 const monthlyTotals = {
                     Jan: 0, Feb: 0, Mar: 0, Apr: 0, May: 0, Jun: 0,
                     Jul: 0, Aug: 0, Sep: 0, Oct: 0, Nov: 0, Dec: 0
                 };
 
-                // Create an array to hold history items with task details
                 const history = [];
 
                 for (const payment of payments) {
                     const amount = payment.amount || 0;
                     totalEarned += amount;
 
-                    // Track monthly distribution based on paid_at date string or object
                     if (payment.paid_at) {
                         const dateObj = new Date(payment.paid_at);
                         const monthName = dateObj.toLocaleString('en-US', { month: 'short' }); // e.g., "Jun"
@@ -972,7 +891,6 @@ async function run() {
                         }
                     }
 
-                    // Look up the matching task simply
                     let taskTitle = "Assignment Project";
                     try {
                         if (payment.task_id) {
@@ -982,11 +900,9 @@ async function run() {
                             }
                         }
                     } catch (err) {
-                        // If ObjectId conversion fails, keep default title and don't crash
                         console.error("Task look up skipped or failed for ID:", payment.task_id);
                     }
 
-                    // Format history item
                     history.push({
                         id: payment._id,
                         taskTitle: taskTitle,
@@ -999,17 +915,14 @@ async function run() {
 
                 const averagePerTask = paymentCount > 0 ? parseFloat((totalEarned / paymentCount).toFixed(2)) : 0;
 
-                // 3. Format monthly chart data array for frontend
                 const baseMonths = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
                 const chartData = baseMonths.map(month => ({
                     name: month,
                     earnings: monthlyTotals[month]
                 }));
 
-                // Sort history by date descending (newest first)
                 history.sort((a, b) => new Date(b.date) - new Date(a.date));
 
-                // Return final clean response object
                 return res.status(200).json({
                     summary: {
                         totalEarned,
@@ -1026,10 +939,6 @@ async function run() {
             }
         });
 
-        /**
-         * PATCH /tasks/:id/submit-deliverable
-         * Submits assignment assets and changes job workflow state to completed
-         */
         app.patch('/tasks/:id/submit-deliverable', verifyToken, async (req, res) => {
             try {
                 const { id } = req.params;
@@ -1042,7 +951,6 @@ async function run() {
                     return res.status(400).json({ message: "Invalid project identifier provided." });
                 }
 
-                // FIX 3: Replaced 'db.collection('tasks')' with your global tasksCollection variable if 'db' isn't defined
                 const result = await tasksCollection.updateOne(
                     { _id: new ObjectId(id) },
                     {
@@ -1064,65 +972,25 @@ async function run() {
                 return res.status(500).json({ message: "Internal server error updating task status." });
             }
         });
-        // GET /task-details/:id
-        // app.get('/task-details/:id', async (req, res) => {
-        //     try {
-        //         const { id } = req.params;
-
-        //         if (!id || id === 'undefined') {
-        //             return res.status(400).json({ message: "Invalid or missing Task Identifier parameter." });
-        //         }
-
-        //         // Search using the database entry string conversion safely
-        //         const task = await tasksCollection.findOne({ _id: new ObjectId(id.toString().trim()) });
-
-        //         if (!task) {
-        //             return res.status(404).json({ message: "The specified task profile could not be found." });
-        //         }
-
-        //         // Return all fields requested with fallback data types
-        //         return res.status(200).json({
-        //             _id: task._id,
-        //             title: task.title || "Untitled Assignment Task",
-        //             category: task.category || "General Engineering",
-        //             description: task.description || "No full summary description was attached to this project outline.",
-        //             budget: task.budget || 0,
-        //             deadline: task.deadline || "Open Window",
-        //             client_email: task.client_email || "unknown-client@system.local",
-        //             status: task.status || "completed",
-        //             deliverable_url: task.deliverable_url || "",
-        //             createdAt: task.createdAt || task.paid_at || new Date(),
-        //             proposals: Array.isArray(task.proposals) ? task.proposals : []
-        //         });
-
-        //     } catch (error) {
-        //         console.error("❌ Task Audit API Fault:", error);
-        //         return res.status(500).json({ message: "Internal server error reading task details." });
-        //     }
-        // });
+        
         app.get('/task-details/:id', verifyToken, async (req, res) => {
             try {
                 const { id } = req.params;
-
-                // 1. Safely normalize and check for empty/undefined values
                 const cleanId = id?.toString().trim();
                 if (!cleanId || cleanId === 'undefined' || cleanId === '') {
                     return res.status(400).json({ message: "Invalid or missing Task Identifier parameter." });
                 }
 
-                // 2. Validate MongoDB ObjectId format before database query
                 if (!ObjectId.isValid(cleanId)) {
                     return res.status(400).json({ message: "The provided Task Identifier format is invalid." });
                 }
 
-                // 3. Fetch task from DB
                 const task = await tasksCollection.findOne({ _id: new ObjectId(cleanId) });
 
                 if (!task) {
                     return res.status(404).json({ message: "The specified task profile could not be found." });
                 }
 
-                // 4. Fetch review associated with this task (using ObjectId matching)
                 const review = await reviewsCollection.findOne({
                     $or: [
                         { taskId: cleanId },                 // If it was saved as a String
@@ -1130,7 +998,6 @@ async function run() {
                     ]
                 });
 
-                // 5. Return sanitized payload with consistent fallback data types and the review
                 return res.status(200).json({
                     _id: task._id,
                     title: task.title || "Untitled Assignment Task",
@@ -1279,8 +1146,13 @@ async function run() {
          */
         app.get('/tasks', async (req, res) => {
             try {
-                const { email, search, category, status, minBudget, maxBudget } = req.query;
+                const { email, search, category, status, minBudget, maxBudget, page, limit } = req.query;
                 let query = {};
+
+                // Parse pagination properties with fallback defaults
+                const currentPage = Math.max(parseInt(page, 10) || 1, 1);
+                const limitCount = Math.max(parseInt(limit, 10) || 9, 1); // Defaults to a max count of 9 documents
+                const skipCount = (currentPage - 1) * limitCount;
 
                 if (email) {
                     query.client_email = email;
@@ -1308,8 +1180,24 @@ async function run() {
                     if (maxBudget) query.budget.$lte = Number(maxBudget);
                 }
 
-                const tasks = await tasksCollection.find(query).sort({ createdAt: -1 }).toArray();
-                return res.status(200).json(tasks);
+                // Count match states asynchronously for navigation layouts
+                const totalDocuments = await tasksCollection.countDocuments(query);
+                const totalPages = Math.ceil(totalDocuments / limitCount) || 1;
+
+                // Fetch limited documents matching the current page window
+                const tasks = await tasksCollection.find(query)
+                    .sort({ createdAt: -1 })
+                    .skip(skipCount)
+                    .limit(limitCount)
+                    .toArray();
+
+                // Return structured dataset properties
+                return res.status(200).json({
+                    tasks,
+                    totalPages,
+                    currentPage,
+                    totalDocuments
+                });
             } catch (error) {
                 console.error("GET /tasks Error:", error);
                 return res.status(500).json({ message: "Internal server error." });
@@ -1583,8 +1471,7 @@ async function run() {
                             as: "taskDetails"
                         }
                     },
-                    // 2. Filter: Only keep proposals where the task belongs to this client
-                    // We use an array check instead of $unwind so nothing gets dropped if a task changes status!
+
                     {
                         $match: {
                             "taskDetails.client_email": clientEmail
@@ -1639,16 +1526,6 @@ async function run() {
                 return res.status(500).json({ message: "Internal server error." });
             }
         });
-
-        /**
-         * GET /all-proposals-summary
-         */
-        // -------------------------------------------------------------------------
-        // 📋 PUBLIC PROPOSALS SUMMARY API ENDPOINT
-        // -------------------------------------------------------------------------
-        // -------------------------------------------------------------------------
-        // 📋 PUBLIC PROPOSALS SUMMARY API ENDPOINT
-        // -------------------------------------------------------------------------
         app.get('/all-proposals-summary', async (req, res) => {
             try {
                 const proposalsWithStatus = await proposalsCollection.aggregate([
@@ -1691,10 +1568,7 @@ async function run() {
         // GET: Calculate and rank the Top 3 Freelancers based on ratings
         app.get("/api/top-freelancers", async (req, res) => {
             try {
-                // 1. Grab all freelancer records
-                // Assumes your freelancers are stored in a accessible endpoint array or MongoDB collection
-                // Replace with database query if using native drivers (e.g., await Freelancer.find({}))
-                const freelancersResponse = await fetch("http://localhost:8080/freelancers");
+                const freelancersResponse = await fetch(`${process.env.SERVER_URL}/freelancers`);
                 if (!freelancersResponse.ok) {
                     return res.status(500).json({ error: "Failed to collect core freelancer profiles registry." });
                 }
@@ -1702,7 +1576,7 @@ async function run() {
 
                 // 2. Fetch all evaluation reviews
                 // Assumes your global reviews collection exists on this endpoint structure
-                const reviewsResponse = await fetch("http://localhost:8080/api/reviews");
+                const reviewsResponse = await fetch("${process.env.SERVER_URL}/api/reviews");
                 let allReviews = [];
                 if (reviewsResponse.ok) {
                     allReviews = await reviewsResponse.json();
@@ -1723,7 +1597,7 @@ async function run() {
                     // Calculate exact average star metric rating matrix
                     let averageRating = 0;
                     if (totalJobsDone > 0) {
-                        // If rating is passed down as a quantitative string ("Excellent", "Good"), map it or reduce numbers
+
                         const sum = matchingReviews.reduce((acc, curr) => {
                             let numericalValue = 5; // Default fallback score
 
@@ -1766,7 +1640,7 @@ async function run() {
 
             try {
                 // 1. Fetch all basic freelancer accounts
-                const freelancersResponse = await fetch("http://localhost:8080/freelancers");
+                const freelancersResponse = await fetch(`${process.env.SERVER_URL}/freelancers`);
                 if (!freelancersResponse.ok) {
                     console.error("❌ [BACKEND DIAGNOSTIC] Failed fetching basic user node list.");
                     return res.status(500).json({ error: "Failed to collect core freelancer profiles registry." });
@@ -1782,7 +1656,7 @@ async function run() {
 
                         try {
                             // Pull specific reviews filtered by the freelancer's email address
-                            const reviewResponse = await fetch(`http://localhost:8080/api/freelancer-reviews?email=${encodeURIComponent(freelancer.email)}`);
+                            const reviewResponse = await fetch(`${process.env.SERVER_URL}/api/freelancer-reviews?email=${encodeURIComponent(freelancer.email)}`);
                             if (reviewResponse.ok) {
                                 matchingReviews = await reviewResponse.json();
                             }
@@ -1888,15 +1762,6 @@ async function run() {
                 });
             }
         });
-        // PATCH /api/tasks/:id/complete
-        // PATCH: http://localhost:8080/api/tasks/:id/complete
-        /**
-         * PATCH: Transition status field from 'in_progress' to 'Completed'
-         * Ensures task is verified, open to edits, and owned by the requesting client.
-         */
-        // Ensure your Task model is imported at the top of your backend file
-        // const Task = require("../models/Task"); 
-
         app.patch("/api/tasks/:id/complete", verifyToken, async (req, res) => {
             const { id } = req.params;
             const { email } = req.body;
@@ -1951,7 +1816,9 @@ async function run() {
 
 // Invoke the setup runner safely
 run().catch(console.dir);
-
+app.get('/', (req, res) => {
+  res.send('Skillswap Server is running smoothly!');
+});
 // Start the server
 app.listen(port, () => {
     console.log(`Server listening context safely on port ${port}`);
