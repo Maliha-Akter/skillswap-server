@@ -102,7 +102,6 @@ async function run() {
                 return res.status(500).json({ message: "Internal authentication error." });
             }
         };
-
         app.get('/api/admin/users', verifyToken, authAdmin, async (req, res) => {
             try {
                 console.log("==> [TRACE 5: ROUTE REACHED] Request bypassed both middlewares safely!");
